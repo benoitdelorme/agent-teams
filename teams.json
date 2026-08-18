@@ -9,7 +9,8 @@
     "Chemins relatifs à ce fichier. Ajouter une team = 1 entrée ici + prompts/<name>.md.",
     "  `enabled: false` sur une team = ignorée par le lanceur (garde l'exemple sans le lancer).",
     "RUNNERS — quel binaire lance le lead: defaults.runner ou team.runner, clé de `runners` = { command, brain?, drop_flags?, healthcheck?, start? }.",
-    "shell_prompt_regex — motif du prompt zsh attendu avant de taper la commande dans un nouveau workspace."
+    "shell_prompt_regex — motif du prompt zsh attendu avant de taper la commande dans un nouveau workspace.",
+    "prices_per_mtok — optionnel: { \"<model>\": {\"in\",\"out\",\"cache_read\",\"cache_write\"} } en $/M tokens pour que `teams cost` affiche des dollars."
   ],
   "shared_dir": "shared",
   "permission_mode": "yolo",

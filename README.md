@@ -28,6 +28,16 @@ bin/teams down     # stops everything
 
 Then describe a feature to gestion and wait.
 
+While it runs:
+
+```bash
+bin/teams status       # who is idle/working/dead, PLAN.md tasks, last messages
+bin/teams cost         # tokens per team, lead vs workers, per model
+bin/teams up --resume  # after a crash: re-attach, restart dead sessions with their context
+```
+
+Every message between teams is logged automatically to `shared/LOG.md` (hook-based, costs no tokens).
+
 ## Configuration
 
 Everything is in `teams.json`:
@@ -36,6 +46,7 @@ Everything is in `teams.json`:
 - `workers` — per team: add, override or remove workers from the catalogue in `agents/`
 - `runners` — which command starts a lead (`claude` by default)
 - `permission_mode` — `yolo` by default (no prompts)
+- `prices_per_mtok` — optional `{ "<model>": { "in", "out", "cache_read", "cache_write" } }` to get $ in `teams cost`
 
 Add a team: `bin/teams add design --cwd ../design`, then edit `prompts/design.md`.
 
@@ -46,7 +57,7 @@ teams.json        config
 bin/teams         launcher
 prompts/          how leads work, communication protocol, one role file per team
 agents/           worker definitions (worker-simple, worker-complex)
-shared/           PLAN.md and CONTRACTS.md, shared by all teams
+shared/           PLAN.md, CONTRACTS.md and LOG.md, shared by all teams
 ```
 
 ## License
