@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """teams — launch/manage a set of Claude Code team sessions inside programa.
 
-  teams up [--dry-run]                  one named programa workspace per team, claude started in each, primary selected
-  teams status                          show roster + programa tree
+  teams up [--dry-run] [--resume]       one named programa workspace per team, claude started in each, primary selected
+                                        --resume: re-attach to a running setup, restart dead sessions with --continue
+  teams status                          liveness per team, PLAN.md task summary, tail of shared/LOG.md
+  teams cost                            token usage per team (lead vs workers, per model); $ if prices_per_mtok is set
   teams msg <team> <text...>            type text into a team's terminal (fallback channel)
   teams down                            /exit every team and close their workspaces
   teams add <name> --cwd <dir> [--purpose "..."]   register a new team + prompt stub
@@ -10,12 +12,15 @@
 
 Config: teams.json next to ../ (see --config). Prompts in prompts/, workers in agents/.
 """
-import argparse, json, os, re, shlex, subprocess, sys
+import argparse, json, os, re, shlex, subprocess, sys, time
+from datetime import datetime
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent.parent          # teams/
 DEFAULT_CONFIG = HERE / "teams.json"
 STATE = HERE / ".state" / "surfaces.json"
+SESS = HERE / ".state" / "sessions"          # one json per team, written by the hooks
+SELF = Path(__file__).resolve()
 
 
 # ---------- config -----------------------------------------------------------
@@ -159,6 +164,7 @@ def claude_cmd(cfg: dict, team: dict, surfaces: dict) -> list[str]:
            "--add-dir", str(cfg["shared_abs"])]
     for d in [*cfg["defaults"].get("add_dirs", []), *team.get("add_dirs", [])]:
         cmd += ["--add-dir", str((cfg["_root"] / d).resolve())]
+    cmd += ["--settings", hook_settings_json(team)]
     pm = team.get("permission_mode", cfg.get("permission_mode"))
     if pm == "yolo":
         cmd.append("--dangerously-skip-permissions")
@@ -168,6 +174,57 @@ def claude_cmd(cfg: dict, team: dict, surfaces: dict) -> list[str]:
         while flag in cmd:
             i = cmd.index(flag); del cmd[i:i + 2]
     return cmd
+
+
+def hook_settings_json(team: dict) -> str:
+    """Claude Code hooks that make each team session report to .state/ — no reliance on prompts."""
+    hook = f"TEAMS_TEAM={shlex.quote(team['name'])} TEAMS_ROOT={shlex.quote(str(HERE))} python3 {shlex.quote(str(SELF))} _hook"
+    ev = lambda: [{"matcher": "", "hooks": [{"type": "command", "command": hook, "timeout": 5}]}]
+    return json.dumps({"hooks": {
+        "SessionStart": ev(), "UserPromptSubmit": ev(), "Stop": ev(), "SessionEnd": ev(),
+        "PreToolUse": [{"matcher": "SendMessage", "hooks": [{"type": "command", "command": hook, "timeout": 5}]}],
+    }})
+
+
+def cmd_hook():
+    """Entry point for the injected hooks (stdin = hook JSON). Never fails the tool call."""
+    team, root = os.environ.get("TEAMS_TEAM", "?"), Path(os.environ.get("TEAMS_ROOT", str(HERE)))
+    try:
+        d = json.loads(sys.stdin.read() or "{}")
+    except json.JSONDecodeError:
+        d = {}
+    ev = d.get("hook_event_name", "")
+    sess_dir = root / ".state" / "sessions"; sess_dir.mkdir(parents=True, exist_ok=True)
+    f = sess_dir / f"{team}.json"
+    try:
+        st = json.loads(f.read_text()) if f.exists() else {}
+    except json.JSONDecodeError:
+        st = {}
+    st.update({k: d[k] for k in ("session_id", "transcript_path", "cwd") if d.get(k)})
+    st["status"] = {"SessionStart": "idle", "UserPromptSubmit": "working", "Stop": "idle", "SessionEnd": "gone"}.get(ev, st.get("status", "?"))
+    st["updated"] = datetime.now().isoformat(timespec="seconds")
+    st.setdefault("sessions", [])
+    if d.get("session_id") and d["session_id"] not in st["sessions"]:
+        st["sessions"].append(d["session_id"])
+    if ev == "SessionEnd":
+        st.pop("session_id", None)
+    f.write_text(json.dumps(st, indent=2))
+    if ev == "PreToolUse" and d.get("tool_name") == "SendMessage":
+        ti = d.get("tool_input", {})
+        msg = ti.get("message"); msg = msg if isinstance(msg, str) else json.dumps(msg)
+        head, _, body = msg.partition("\n")
+        cfg_shared = None
+        try:
+            cfg = json.loads((root / "teams.json").read_text())
+            cfg_shared = (root / cfg.get("shared_dir", "shared")).resolve()
+        except Exception:
+            cfg_shared = root / "shared"
+        line = f"{datetime.now():%H:%M:%S} {team} → {ti.get('to','?')} | {head.strip()}"
+        if body.strip():
+            line += f"\n    " + "\n    ".join(l for l in body.strip().splitlines()[:5])
+        with open(cfg_shared / "LOG.md", "a") as fh:
+            fh.write(line + "\n")
+    print("{}")
 
 
 def pretrust(cfg: dict):
@@ -250,6 +307,16 @@ def preflight_runners(cfg: dict):
 
 
 # ---------- commands ---------------------------------------------------------
+def wait_shell(ws: str, surf: str, cfg: dict):
+    """Block until the shell prompt is visible in a fresh workspace, so a typed command is not lost."""
+    pat = cfg.get("shell_prompt_regex", r"(➜|→|❯|\$|%|#) ")
+    r = subprocess.run(["programa", "wait-surface", "--workspace", ws, "--surface", surf, "--pattern", pat, "--timeout", "15"],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        time.sleep(3)                                     # fallback: give the shell a moment anyway
+    time.sleep(0.3)
+
+
 def workspace_surface(ws_ref: str) -> str:
     """First terminal surface of a workspace (the shell new-workspace opened)."""
     data = json.loads(programa("--json", "tree", "--workspace", ws_ref))
@@ -278,8 +345,13 @@ def cmd_up(cfg: dict, a):
             print(shell_line(claude_cmd(cfg, t, surfaces)), "\n")
         write_roster_json(cfg, surfaces)
         return
+    if a.resume:
+        return cmd_resume(cfg, ordered, primary)
     if load_state():
-        die("teams already up (see .state/surfaces.json) - run `teams down` first")
+        die("teams already up (see .state/surfaces.json) - run `teams down` first, or `teams up --resume`")
+    (cfg["shared_abs"] / "LOG.md").touch()
+    with open(cfg["shared_abs"] / "LOG.md", "a") as fh:
+        fh.write(f"\n## up {datetime.now():%Y-%m-%d %H:%M}\n")
     # 1) one named workspace per team, so every roster knows every surface before any claude starts
     for t in ordered:
         args = ["new-workspace", "--name", t.get("title", t["name"]), "--cwd", str(t["cwd_abs"])]
@@ -289,21 +361,187 @@ def cmd_up(cfg: dict, a):
         workspaces[t["name"]] = ws
         surfaces[t["name"]] = workspace_surface(ws)
         print(f"[{t['name']}] workspace {ws} / surface {surfaces[t['name']]}")
-    save_state({"surfaces": surfaces, "workspaces": workspaces})
+    save_state({"surfaces": surfaces, "workspaces": workspaces, "started_at": datetime.now().isoformat(timespec="seconds")})
     write_roster_json(cfg, surfaces)
-    # 2) launch claude in each workspace
+    for f in SESS.glob("*.json"):
+        f.unlink()
+    # 2) launch claude in each workspace (after its shell prompt is up)
     for t in ordered:
+        wait_shell(workspaces[t["name"]], surfaces[t["name"]], cfg)
         programa("send", "--workspace", workspaces[t["name"]], "--surface", surfaces[t["name"]],
                  shell_line(claude_cmd(cfg, t, surfaces)) + "\n")
     programa("select-workspace", "--workspace", workspaces[primary["name"]], check=False)
     print(f"\n{primary['name']} is selected - talk to it there. `teams down` closes everything.")
 
 
+def session_info(name: str) -> dict:
+    f = SESS / f"{name}.json"
+    try:
+        return json.loads(f.read_text()) if f.exists() else {}
+    except json.JSONDecodeError:
+        return {}
+
+
+_TTY_CACHE = {}
+def surface_tty(ws: str, surf: str) -> str | None:
+    if not in_programa():
+        return None
+    if ws not in _TTY_CACHE:
+        try:
+            data = json.loads(programa("--json", "tree", "--workspace", ws))
+        except SystemExit:
+            data = {}
+        m = {}
+        for w in data.get("windows", []):
+            for x in w.get("workspaces", []):
+                for pane in x.get("panes", []):
+                    for sf in pane.get("surfaces", []):
+                        m[sf["ref"]] = sf.get("tty")
+        _TTY_CACHE[ws] = m
+    return _TTY_CACHE[ws].get(surf)
+
+
+def process_alive(name: str) -> bool:
+    """Alive = a claude process runs on the team's pane tty (robust to programa rewriting argv / --continue)."""
+    st = load_state()
+    tty = surface_tty(st.get("workspaces", {}).get(name, ""), st.get("surfaces", {}).get(name, ""))
+    if tty:
+        r = subprocess.run(["ps", "-t", tty, "-o", "command="], capture_output=True, text=True)
+        return any("/claude" in l or l.startswith("claude") for l in r.stdout.splitlines())
+    sid = session_info(name).get("session_id")
+    if sid:
+        return subprocess.run(["pgrep", "-f", f"claude.*--session-id {sid}"], capture_output=True).returncode == 0
+    return False
+
+
+def workspace_exists(ws: str) -> bool:
+    try:
+        return ws in programa("--json", "list-workspaces") if in_programa() else False
+    except SystemExit:
+        return False
+
+
+def plan_summary(cfg: dict) -> str:
+    f = cfg["shared_abs"] / "PLAN.md"
+    if not f.exists():
+        return "PLAN.md: none"
+    rows = [l for l in f.read_text().splitlines() if l.startswith("|") and not set(l) <= set("|- ")]
+    tasks = [[c.strip() for c in l.strip("|").split("|")] for l in rows[1:]] if rows else []
+    tasks = [t for t in tasks if t and re.fullmatch(r"T\d+", t[0])]
+    if not tasks:
+        return "PLAN.md: no tasks yet"
+    by = {}
+    for t in tasks:
+        st = t[4] if len(t) > 4 else "?"
+        by[st] = by.get(st, 0) + 1
+    title = next((l[2:] for l in f.read_text().splitlines() if l.startswith("# ")), "")
+    return f"PLAN.md: {title} — " + ", ".join(f"{v} {k}" for k, v in by.items()) + "\n  " + "\n  ".join(
+        f"{t[0]} [{t[1]}] {t[4] if len(t)>4 else '?':6} {t[2][:60]}" for t in tasks)
+
+
 def cmd_status(cfg: dict, a):
-    s = load_state().get("surfaces", {})
-    print(roster_text(cfg, {"name": "-"}, s))
-    if in_programa():
-        print("\n" + programa("tree"))
+    st = load_state()
+    if not st:
+        print("teams: down (no state). `teams up` to start."); return
+    print(f"up since {st.get('started_at','?')}\n")
+    for t in cfg["teams"]:
+        si = session_info(t["name"])
+        alive = process_alive(t["name"])
+        state = si.get("status", "?") if alive else "DEAD"
+        ws = st.get("workspaces", {}).get(t["name"], "?")
+        print(f"  {t['name']:10} {state:8} {ws:14} last {si.get('updated','-')[11:]:8} session {str(si.get('session_id','-'))[:8]}")
+    print("\n" + plan_summary(cfg))
+    log = cfg["shared_abs"] / "LOG.md"
+    if log.exists():
+        lines = [l for l in log.read_text().splitlines() if l.strip()]
+        print("\nLOG.md (last 12):\n  " + "\n  ".join(lines[-12:]))
+
+
+def cmd_resume(cfg: dict, ordered: list, primary: dict):
+    """Re-attach to an existing `up`: recreate missing workspaces, restart dead sessions with --continue."""
+    st = load_state()
+    if not st:
+        die("nothing to resume (no state) — run `teams up`")
+    surfaces, workspaces = st.get("surfaces", {}), st.get("workspaces", {})
+    for t in ordered:
+        n = t["name"]
+        if not workspaces.get(n) or not workspace_exists(workspaces[n]):
+            args = ["new-workspace", "--name", t.get("title", n), "--cwd", str(t["cwd_abs"])]
+            ws = programa(*args).split()[1]
+            workspaces[n], surfaces[n] = ws, workspace_surface(ws)
+            print(f"[{n}] workspace recreated {ws}")
+    save_state({**st, "surfaces": surfaces, "workspaces": workspaces})
+    write_roster_json(cfg, surfaces)
+    for t in ordered:
+        n = t["name"]
+        if process_alive(n):
+            print(f"[{n}] alive — untouched")
+            continue
+        cmd = claude_cmd(cfg, t, surfaces)
+        cmd.insert(1, "--continue")                      # resume that dir's latest conversation
+        wait_shell(workspaces[n], surfaces[n], cfg)
+        programa("send", "--workspace", workspaces[n], "--surface", surfaces[n], shell_line(cmd) + "\n")
+        print(f"[{n}] restarted with --continue")
+    with open(cfg["shared_abs"] / "LOG.md", "a") as fh:
+        fh.write(f"\n## resume {datetime.now():%Y-%m-%d %H:%M}\n")
+    programa("select-workspace", "--workspace", workspaces[primary["name"]], check=False)
+
+
+def usage_of(path: Path) -> dict:
+    """Aggregate token usage of one transcript by model, deduping streamed chunks by message id."""
+    seen, out = {}, {}
+    try:
+        for line in open(path):
+            try:
+                d = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            m = d.get("message") or {}
+            if d.get("type") != "assistant" or "usage" not in m:
+                continue
+            seen[m.get("id") or d.get("uuid")] = (m.get("model", "?"), m["usage"])
+    except OSError:
+        return out
+    for model, u in seen.values():
+        o = out.setdefault(model, {"in": 0, "out": 0, "cache_read": 0, "cache_write": 0, "msgs": 0})
+        o["in"] += u.get("input_tokens", 0); o["out"] += u.get("output_tokens", 0)
+        o["cache_read"] += u.get("cache_read_input_tokens", 0); o["cache_write"] += u.get("cache_creation_input_tokens", 0)
+        o["msgs"] += 1
+    return out
+
+
+def cmd_cost(cfg: dict, a):
+    prices = cfg.get("prices_per_mtok", {})          # {model: {"in":x,"out":y,"cache_read":z,"cache_write":w}}
+    grand = {}
+    for t in cfg["teams"]:
+        si = session_info(t["name"])
+        tp = si.get("transcript_path")
+        if not tp:
+            print(f"{t['name']}: no session recorded"); continue
+        rows = {}
+        for sid in si.get("sessions", []):
+            base = Path(tp).parent / f"{sid}.jsonl"
+            for label, path in [("lead", base), *[(f"worker:{p.stem}", p) for p in sorted((base.parent / sid / "subagents").glob("agent-*.jsonl"))]]:
+                for model, u in usage_of(path).items():
+                    kind = "lead" if label == "lead" else "workers"
+                    r = rows.setdefault((kind, model), {"in": 0, "out": 0, "cache_read": 0, "cache_write": 0, "msgs": 0, "n": 0})
+                    for k in ("in", "out", "cache_read", "cache_write", "msgs"):
+                        r[k] += u[k]
+                    r["n"] += 1 if kind == "workers" else 0
+        print(f"\n{t['name']}")
+        for (kind, model), r in sorted(rows.items()):
+            cost = ""
+            if model in prices:
+                p = prices[model]
+                usd = (r["in"] * p.get("in", 0) + r["out"] * p.get("out", 0) + r["cache_read"] * p.get("cache_read", 0) + r["cache_write"] * p.get("cache_write", 0)) / 1e6
+                cost = f"  ≈ ${usd:.2f}"
+                g = grand.setdefault(t["name"], 0); grand[t["name"]] = g + usd
+            extra = f" ({r['n']} agents)" if kind == "workers" else ""
+            print(f"  {kind:8}{extra:14} {model:18} out {r['out']:>8,}  in {r['in']:>7,}  cache r/w {r['cache_read']:>10,}/{r['cache_write']:>9,}  msgs {r['msgs']:>4}{cost}")
+    if grand:
+        print("\ntotal ≈ $" + f"{sum(grand.values()):.2f}  (" + ", ".join(f"{k} ${v:.2f}" for k, v in grand.items()) + ")")
+    elif not prices:
+        print("\n(no `prices_per_mtok` in teams.json → tokens only)")
 
 
 def team_target(name: str) -> list[str]:
@@ -325,6 +563,8 @@ def cmd_down(cfg: dict, a):
     for name, ws in st.get("workspaces", {}).items():
         programa("close-workspace", "--workspace", ws, check=False)
         print(f"[{name}] closed {ws}")
+    with open(cfg["shared_abs"] / "LOG.md", "a") as fh:
+        fh.write(f"## down {datetime.now():%Y-%m-%d %H:%M}\n")
     STATE.unlink(missing_ok=True)
 
 
@@ -347,11 +587,14 @@ def cmd_add(cfg_path: Path, a):
 
 
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] == "_hook":
+        return cmd_hook()
     p = argparse.ArgumentParser(prog="teams", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     sub = p.add_subparsers(dest="cmd", required=True)
-    s = sub.add_parser("up"); s.add_argument("--dry-run", action="store_true")
+    s = sub.add_parser("up"); s.add_argument("--dry-run", action="store_true"); s.add_argument("--resume", action="store_true")
     sub.add_parser("status")
+    sub.add_parser("cost")
     s = sub.add_parser("msg"); s.add_argument("team"); s.add_argument("text", nargs="+")
     sub.add_parser("down")
     s = sub.add_parser("cmd"); s.add_argument("team")
@@ -360,7 +603,7 @@ def main():
     if a.cmd == "add":
         return cmd_add(a.config, a)
     cfg = load(a.config)
-    {"up": cmd_up, "status": cmd_status, "msg": cmd_msg, "down": cmd_down, "cmd": cmd_cmd}[a.cmd](cfg, a)
+    {"up": cmd_up, "status": cmd_status, "cost": cmd_cost, "msg": cmd_msg, "down": cmd_down, "cmd": cmd_cmd}[a.cmd](cfg, a)
 
 
 if __name__ == "__main__":

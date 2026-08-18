@@ -8,7 +8,8 @@
     "  vars: injectées dans le prompt de l'agent via {{nom}}. Built-ins: {{team}}, {{cwd}}, {{shared_dir}}.",
     "Chemins relatifs à ce fichier. Ajouter une team = 1 entrée ici + prompts/<name>.md.",
     "  `enabled: false` sur une team = ignorée par le lanceur (garde l'exemple sans le lancer).",
-    "RUNNERS — quel binaire lance le lead: defaults.runner ou team.runner, clé de `runners` = { command, brain?, drop_flags?, healthcheck?, start? }."
+    "RUNNERS — quel binaire lance le lead: defaults.runner ou team.runner, clé de `runners` = { command, brain?, drop_flags?, healthcheck?, start? }.",
+    "shell_prompt_regex — motif du prompt zsh attendu avant de taper la commande dans un nouveau workspace."
   ],
   "shared_dir": "shared",
   "permission_mode": "yolo",
@@ -57,5 +58,6 @@
     "claude": {
       "command": "claude"
     }
-  }
+  },
+  "shell_prompt_regex": "(➜|→|❯|\\$|%|#) "
 }
