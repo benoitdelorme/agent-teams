@@ -1,0 +1,367 @@
+#!/usr/bin/env python3
+"""teams — launch/manage a set of Claude Code team sessions inside programa.
+
+  teams up [--dry-run]                  one named programa workspace per team, claude started in each, primary selected
+  teams status                          show roster + programa tree
+  teams msg <team> <text...>            type text into a team's terminal (fallback channel)
+  teams down                            /exit every team and close their workspaces
+  teams add <name> --cwd <dir> [--purpose "..."]   register a new team + prompt stub
+  teams cmd <team>                      print the exact `claude` command for a team
+
+Config: teams.json next to ../ (see --config). Prompts in prompts/, workers in agents/.
+"""
+import argparse, json, os, re, shlex, subprocess, sys
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent.parent          # teams/
+DEFAULT_CONFIG = HERE / "teams.json"
+STATE = HERE / ".state" / "surfaces.json"
+
+
+# ---------- config -----------------------------------------------------------
+def load(cfg_path: Path) -> dict:
+    cfg = json.loads(cfg_path.read_text())
+    cfg["_root"] = cfg_path.parent
+    cfg["shared_abs"] = (cfg["_root"] / cfg.get("shared_dir", "shared")).resolve()
+    cfg["teams"] = [t for t in cfg["teams"] if t.get("enabled", True)]
+    runners = cfg.setdefault("runners", {"claude": {"command": "claude"}})
+    seen = set()
+    for t in cfg["teams"]:
+        t["runner_name"] = t.get("runner", cfg["defaults"].get("runner", "claude"))
+        if t["runner_name"] not in runners:
+            die(f"unknown runner {t['runner_name']!r} for team {t['name']} (define it under \"runners\")")
+        t["runner"] = runners[t["runner_name"]]
+        if not re.fullmatch(r"[a-z0-9-]+", t["name"]):
+            die(f"team name must be [a-z0-9-]: {t['name']}")
+        if t["name"] in seen:
+            die(f"duplicate team: {t['name']}")
+        seen.add(t["name"])
+        t["cwd_abs"] = (cfg["_root"] / t["cwd"]).resolve()
+        if not t["cwd_abs"].is_dir():
+            die(f"cwd not found for {t['name']}: {t['cwd_abs']}")
+        t["prompt_abs"] = cfg["_root"] / "prompts" / t.get("prompt", f"{t['name']}.md")
+        if not t["prompt_abs"].is_file():
+            die(f"prompt not found for {t['name']}: {t['prompt_abs']}")
+    primaries = [t for t in cfg["teams"] if t.get("primary")]
+    if len(primaries) != 1:
+        die("exactly one team must have \"primary\": true")
+    return cfg
+
+
+def die(msg: str, code: int = 1):
+    print(f"teams: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+# ---------- prompt / agents assembly -----------------------------------------
+def parse_agent_md(path: Path) -> tuple[str, dict]:
+    text = path.read_text()
+    m = re.match(r"^---\n(.*?)\n---\n(.*)$", text, re.S)
+    if not m:
+        die(f"agent file missing frontmatter: {path}")
+    meta = {}
+    for line in m.group(1).splitlines():
+        k, _, v = line.partition(":")
+        meta[k.strip()] = v.strip()
+    return meta.pop("name", path.stem), {**meta, "prompt": m.group(2).strip()}
+
+
+def resolve_workers(cfg: dict, team: dict) -> dict:
+    """Merge defaults.workers with team.workers. Entry: dict | model-string | False (remove)."""
+    def norm(v):
+        return {"model": v} if isinstance(v, str) else v
+    base = {} if team.get("workers_replace") else {k: dict(norm(v)) for k, v in cfg["defaults"].get("workers", {}).items() if v is not False}
+    for k, v in (team.get("workers") or {}).items():
+        if v is False:
+            base.pop(k, None)
+            continue
+        merged = {**base.get(k, {}), **norm(v)}
+        merged["vars"] = {**base.get(k, {}).get("vars", {}), **norm(v).get("vars", {})}
+        base[k] = merged
+    return base
+
+
+def render(text: str, vars: dict) -> str:
+    for k, v in vars.items():
+        text = text.replace("{{" + k + "}}", str(v))
+    missing = re.findall(r"{{(\w+)}}", text)
+    if missing:
+        die(f"unset template vars {sorted(set(missing))} — set them under workers.<name>.vars in teams.json")
+    return text
+
+
+def worker_specs(cfg: dict, team: dict) -> dict:
+    """name -> full agent spec (description, prompt, model, ...) ready for --agents."""
+    specs = {}
+    for name, w in resolve_workers(cfg, team).items():
+        f = cfg["_root"] / w.get("file", f"agents/{name}.md")
+        if not f.is_file():
+            die(f"worker {name} for team {team['name']}: file not found {f}")
+        _, spec = parse_agent_md(f)
+        for k in ("model", "description"):
+            if w.get(k):
+                spec[k] = w[k]
+        vars = {"team": team["name"], "cwd": str(team["cwd_abs"]), "shared_dir": str(cfg["shared_abs"]), **w.get("vars", {})}
+        spec["prompt"] = render(spec["prompt"], vars)
+        spec["description"] = render(spec.get("description", ""), vars)
+        specs[name] = spec
+    if not specs:
+        die(f"team {team['name']} has no workers")
+    return specs
+
+
+def build_agents_json(cfg: dict, team: dict) -> str:
+    return json.dumps(worker_specs(cfg, team), ensure_ascii=False)
+
+
+def workers_text(cfg: dict, team: dict) -> str:
+    lines = ["# WORKERS available to you (Agent tool, subagent_type = name)"]
+    brain = team["runner"].get("brain")
+    if brain:
+        lines.append(f"(this team runs on {brain}: every worker below actually thinks with that model, whatever its nominal model)")
+    for name, spec in worker_specs(cfg, team).items():
+        lines.append(f"- `{name}` ({spec.get('model','?')}): {spec.get('description','')}")
+    return "\n".join(lines)
+
+
+def roster_text(cfg: dict, me: dict, surfaces: dict) -> str:
+    lines = [f"# ROSTER  (you are: {me['name']})", f"SHARED_DIR: {cfg['shared_abs']}", ""]
+    for t in cfg["teams"]:
+        tag = " ← you" if t is me else ""
+        s = surfaces.get(t["name"], "?")
+        brain = t["runner"].get("brain") or t.get("model", cfg["defaults"].get("model", "claude-fable-5"))
+        lines.append(f"- {t['name']}{' (primary)' if t.get('primary') else ''} [{brain}]: {t.get('purpose','')}  cwd={t['cwd_abs']}  surface={s}{tag}")
+    return "\n".join(lines)
+
+
+def system_prompt(cfg: dict, team: dict, surfaces: dict) -> str:
+    parts = [
+        (cfg["_root"] / "prompts" / "_common.md").read_text(),
+        workers_text(cfg, team),
+        team["prompt_abs"].read_text(),
+        roster_text(cfg, team, surfaces),
+        (cfg["_root"] / "prompts" / "PROTOCOL.md").read_text(),
+    ]
+    return "\n\n".join(p.strip() for p in parts)
+
+
+def claude_cmd(cfg: dict, team: dict, surfaces: dict) -> list[str]:
+    prompt_file = HERE / ".state" / f"prompt-{team['name']}.md"
+    prompt_file.parent.mkdir(exist_ok=True)
+    prompt_file.write_text(system_prompt(cfg, team, surfaces))
+    agents_file = HERE / ".state" / f"agents-{team['name']}.json"
+    agents_file.write_text(build_agents_json(cfg, team))
+    runner = team["runner"]
+    cmd = [runner.get("command", "claude"), "-n", team["name"],
+           "--model", team.get("model", cfg["defaults"].get("model", "claude-fable-5")),
+           "--append-system-prompt-file", str(prompt_file),
+           "--agents", f"$(cat {shlex.quote(str(agents_file))})",
+           "--add-dir", str(cfg["shared_abs"])]
+    for d in [*cfg["defaults"].get("add_dirs", []), *team.get("add_dirs", [])]:
+        cmd += ["--add-dir", str((cfg["_root"] / d).resolve())]
+    pm = team.get("permission_mode", cfg.get("permission_mode"))
+    if pm == "yolo":
+        cmd.append("--dangerously-skip-permissions")
+    elif pm:
+        cmd += ["--permission-mode", pm]
+    for flag in runner.get("drop_flags", []):          # e.g. claudex sets --model itself
+        while flag in cmd:
+            i = cmd.index(flag); del cmd[i:i + 2]
+    return cmd
+
+
+def pretrust(cfg: dict):
+    """Mark every team cwd as trusted in ~/.claude.json so no 'trust this folder' dialog blocks a pane."""
+    path = Path.home() / ".claude.json"
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return
+    projects = data.setdefault("projects", {})
+    changed = False
+    for t in cfg["teams"]:
+        entry = projects.setdefault(str(t["cwd_abs"]), {})
+        if not entry.get("hasTrustDialogAccepted"):
+            entry["hasTrustDialogAccepted"] = True
+            changed = True
+    if changed:
+        path.write_text(json.dumps(data, indent=2, ensure_ascii=False))
+
+
+def shell_line(cmd: list[str]) -> str:
+    # keep the $(cat ...) unquoted so the shell expands it
+    return " ".join(f'"{c}"' if c.startswith("$(") else shlex.quote(c) for c in cmd)
+
+
+# ---------- programa ---------------------------------------------------------
+def in_programa() -> bool:
+    return bool(os.environ.get("PROGRAMA_SURFACE_ID") and os.environ.get("PROGRAMA_SOCKET_PATH"))
+
+
+def programa(*args: str, check=True) -> str:
+    r = subprocess.run(["programa", *args], capture_output=True, text=True)
+    if check and r.returncode != 0:
+        die(f"programa {' '.join(args)} failed: {r.stderr.strip() or r.stdout.strip()}")
+    return r.stdout.strip()
+
+
+def load_state() -> dict:
+    return json.loads(STATE.read_text()) if STATE.exists() else {}
+
+
+def save_state(d: dict):
+    STATE.parent.mkdir(exist_ok=True)
+    STATE.write_text(json.dumps(d, indent=2))
+
+
+def write_roster_json(cfg: dict, surfaces: dict):
+    data = {"shared_dir": str(cfg["shared_abs"]),
+            "teams": {t["name"]: {"cwd": str(t["cwd_abs"]), "surface": surfaces.get(t["name"]),
+                                   "primary": bool(t.get("primary")), "purpose": t.get("purpose", "")}
+                      for t in cfg["teams"]}}
+    (cfg["shared_abs"] / ".roster.json").write_text(json.dumps(data, indent=2))
+
+
+def preflight_runners(cfg: dict):
+    """For every runner in use with a healthcheck URL: ensure it answers, else run its start command and wait."""
+    import time, urllib.request, urllib.error
+    def alive(url):
+        try:
+            urllib.request.urlopen(url, timeout=2); return True
+        except urllib.error.HTTPError:
+            return True                       # 401/404 = something answers
+        except Exception:
+            return False
+    for name in {t["runner_name"] for t in cfg["teams"]}:
+        r = cfg["runners"][name]
+        url = r.get("healthcheck")
+        if not url or alive(url):
+            continue
+        if not r.get("start"):
+            die(f"runner {name}: {url} does not answer and no `start` command is configured")
+        print(f"[{name}] {url} down → {r['start']}")
+        subprocess.run(r["start"], shell=True, check=False)
+        for _ in range(15):
+            time.sleep(1)
+            if alive(url):
+                break
+        else:
+            die(f"runner {name}: still no answer at {url} after start")
+
+
+# ---------- commands ---------------------------------------------------------
+def workspace_surface(ws_ref: str) -> str:
+    """First terminal surface of a workspace (the shell new-workspace opened)."""
+    data = json.loads(programa("--json", "tree", "--workspace", ws_ref))
+    for w in data.get("windows", []):
+        for ws in w.get("workspaces", []):
+            if ws.get("ref") == ws_ref:
+                for pane in ws.get("panes", []):
+                    for surf in pane.get("surfaces", []):
+                        if surf.get("type") == "terminal":
+                            return surf["ref"]
+    die(f"no terminal surface found in {ws_ref}")
+
+
+def cmd_up(cfg: dict, a):
+    pretrust(cfg)
+    if not a.dry_run:
+        preflight_runners(cfg)
+    primary = next(t for t in cfg["teams"] if t.get("primary"))
+    ordered = [t for t in cfg["teams"] if not t.get("primary")] + [primary]   # primary last -> ends up selected
+    surfaces, workspaces = {}, {}
+    if a.dry_run or not in_programa():
+        if not a.dry_run:
+            print("Not inside programa - printing commands to run manually (one per terminal):\n")
+        for t in ordered:
+            print(f"# {t['name']}  (cd {t['cwd_abs']})")
+            print(shell_line(claude_cmd(cfg, t, surfaces)), "\n")
+        write_roster_json(cfg, surfaces)
+        return
+    if load_state():
+        die("teams already up (see .state/surfaces.json) - run `teams down` first")
+    # 1) one named workspace per team, so every roster knows every surface before any claude starts
+    for t in ordered:
+        args = ["new-workspace", "--name", t.get("title", t["name"]), "--cwd", str(t["cwd_abs"])]
+        if t.get("purpose"):
+            args += ["--description", t["purpose"]]
+        ws = programa(*args).split()[1]                     # "OK workspace:6"
+        workspaces[t["name"]] = ws
+        surfaces[t["name"]] = workspace_surface(ws)
+        print(f"[{t['name']}] workspace {ws} / surface {surfaces[t['name']]}")
+    save_state({"surfaces": surfaces, "workspaces": workspaces})
+    write_roster_json(cfg, surfaces)
+    # 2) launch claude in each workspace
+    for t in ordered:
+        programa("send", "--workspace", workspaces[t["name"]], "--surface", surfaces[t["name"]],
+                 shell_line(claude_cmd(cfg, t, surfaces)) + "\n")
+    programa("select-workspace", "--workspace", workspaces[primary["name"]], check=False)
+    print(f"\n{primary['name']} is selected - talk to it there. `teams down` closes everything.")
+
+
+def cmd_status(cfg: dict, a):
+    s = load_state().get("surfaces", {})
+    print(roster_text(cfg, {"name": "-"}, s))
+    if in_programa():
+        print("\n" + programa("tree"))
+
+
+def team_target(name: str) -> list[str]:
+    st = load_state()
+    s, w = st.get("surfaces", {}).get(name), st.get("workspaces", {}).get(name)
+    if not s:
+        die(f"no surface recorded for {name} (run `teams up` first)")
+    return ["--workspace", w, "--surface", s]
+
+
+def cmd_msg(cfg: dict, a):
+    programa("send", *team_target(a.team), " ".join(a.text) + "\n")
+
+
+def cmd_down(cfg: dict, a):
+    st = load_state()
+    for name, surf in st.get("surfaces", {}).items():
+        programa("send", "--workspace", st["workspaces"][name], "--surface", surf, "/exit\n", check=False)
+    for name, ws in st.get("workspaces", {}).items():
+        programa("close-workspace", "--workspace", ws, check=False)
+        print(f"[{name}] closed {ws}")
+    STATE.unlink(missing_ok=True)
+
+
+def cmd_cmd(cfg: dict, a):
+    t = next((t for t in cfg["teams"] if t["name"] == a.team), None) or die(f"unknown team {a.team}")
+    print(shell_line(claude_cmd(cfg, t, load_state().get("surfaces", {}))))
+
+
+def cmd_add(cfg_path: Path, a):
+    raw = json.loads(cfg_path.read_text())
+    if any(t["name"] == a.name for t in raw["teams"]):
+        die(f"team {a.name} already exists")
+    prompt = cfg_path.parent / "prompts" / f"{a.name}.md"
+    if not prompt.exists():
+        tpl = (cfg_path.parent / "prompts" / "_template.md").read_text().replace("<TEAM NAME>", a.name.upper())
+        prompt.write_text(tpl)
+    raw["teams"].append({"name": a.name, "cwd": a.cwd, "prompt": f"{a.name}.md", "purpose": a.purpose or ""})
+    cfg_path.write_text(json.dumps(raw, indent=2, ensure_ascii=False) + "\n")
+    print(f"added {a.name} → edit {prompt}")
+
+
+def main():
+    p = argparse.ArgumentParser(prog="teams", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
+    sub = p.add_subparsers(dest="cmd", required=True)
+    s = sub.add_parser("up"); s.add_argument("--dry-run", action="store_true")
+    sub.add_parser("status")
+    s = sub.add_parser("msg"); s.add_argument("team"); s.add_argument("text", nargs="+")
+    sub.add_parser("down")
+    s = sub.add_parser("cmd"); s.add_argument("team")
+    s = sub.add_parser("add"); s.add_argument("name"); s.add_argument("--cwd", required=True); s.add_argument("--purpose")
+    a = p.parse_args()
+    if a.cmd == "add":
+        return cmd_add(a.config, a)
+    cfg = load(a.config)
+    {"up": cmd_up, "status": cmd_status, "msg": cmd_msg, "down": cmd_down, "cmd": cmd_cmd}[a.cmd](cfg, a)
+
+
+if __name__ == "__main__":
+    main()
