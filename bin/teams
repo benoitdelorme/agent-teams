@@ -164,7 +164,7 @@ def claude_cmd(cfg: dict, team: dict, surfaces: dict) -> list[str]:
         cmd.append("--dangerously-skip-permissions")
     elif pm:
         cmd += ["--permission-mode", pm]
-    for flag in runner.get("drop_flags", []):          # e.g. claudex sets --model itself
+    for flag in runner.get("drop_flags", []):          # runners that set their own model/effort
         while flag in cmd:
             i = cmd.index(flag); del cmd[i:i + 2]
     return cmd

@@ -7,9 +7,8 @@
     "  Par team: `workers` fusionne avec defaults.workers (ajout / surcharge / retrait). `workers_replace: true` ignore les defaults.",
     "  vars: injectées dans le prompt de l'agent via {{nom}}. Built-ins: {{team}}, {{cwd}}, {{shared_dir}}.",
     "Chemins relatifs à ce fichier. Ajouter une team = 1 entrée ici + prompts/<name>.md.",
-    "RUNNERS — quel binaire lance le lead: defaults.runner ou team.runner, clé de `runners`. `claude` = Anthropic. `claudex` = ta fonction zsh (Claude Code branché sur CLIProxyAPI → gpt-5.6-sol): la team entière (lead + workers) pense en GPT mais garde tout Claude Code (SendMessage, workers, protocole).",
-    "  runner = { command, brain?, drop_flags?, healthcheck?, start? }. brain = libellé du modèle réel (roster/WORKERS). drop_flags = flags claude à ne pas passer. healthcheck = URL qui doit répondre (n'importe quel code HTTP) avant de lancer; start = commande exécutée si elle ne répond pas.",
-    "  `enabled: false` sur une team = ignorée par le lanceur (garde l'exemple sans le lancer)."
+    "  `enabled: false` sur une team = ignorée par le lanceur (garde l'exemple sans le lancer).",
+    "RUNNERS — quel binaire lance le lead: defaults.runner ou team.runner, clé de `runners` = { command, brain?, drop_flags?, healthcheck?, start? }."
   ],
   "shared_dir": "shared",
   "permission_mode": "yolo",
@@ -52,33 +51,11 @@
       "cwd": "../sample-frontend",
       "prompt": "frontend.md",
       "purpose": "Client side: UI, pages, API consumption (sample-frontend)."
-    },
-    {
-      "name": "codex",
-      "title": "Codex",
-      "enabled": false,
-      "runner": "claudex",
-      "cwd": "..",
-      "prompt": "codex.md",
-      "purpose": "Peer team pensant en GPT-5.6: review indépendante, second avis, tâches transverses. Même protocole que les autres.",
-      "add_dirs": [
-        "../sample-backend",
-        "../sample-frontend"
-      ]
     }
   ],
   "runners": {
     "claude": {
       "command": "claude"
-    },
-    "claudex": {
-      "command": "claudex",
-      "brain": "gpt-5.6-sol via CLIProxyAPI (:8317 doit tourner)",
-      "drop_flags": [
-        "--model"
-      ],
-      "healthcheck": "http://127.0.0.1:8317/v1/models",
-      "start": "brew services start cliproxyapi"
     }
   }
 }

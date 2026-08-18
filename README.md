@@ -8,7 +8,6 @@ Each team has a lead (Fable 5) that plans and delegates to cheaper workers (Sonn
 
 - **gestion** — you talk to it. It plans the feature, dispatches tasks to the other teams and controls the result. It never codes.
 - **backend** / **frontend** — each receives tasks, splits them, delegates to its workers, verifies, reports back. They negotiate API contracts directly with each other.
-- **codex** (optional) — an independent reviewer running on GPT through your `claudex` command.
 
 Messages between teams are one line (`DONE T2 | src/api.py:40 — tests green`). Details live in shared files, not in messages.
 
@@ -35,7 +34,7 @@ Everything is in `teams.json`:
 
 - `teams[]` — name, title, cwd, prompt, purpose, `primary: true` for the one you talk to
 - `workers` — per team: add, override or remove workers from the catalogue in `agents/`
-- `runners` — which command starts a lead (`claude`, or `claudex` for a GPT brain)
+- `runners` — which command starts a lead (`claude` by default)
 - `permission_mode` — `yolo` by default (no prompts)
 
 Add a team: `bin/teams add design --cwd ../design`, then edit `prompts/design.md`.
@@ -46,7 +45,7 @@ Add a team: `bin/teams add design --cwd ../design`, then edit `prompts/design.md
 teams.json        config
 bin/teams         launcher
 prompts/          how leads work, communication protocol, one role file per team
-agents/           worker definitions (worker-simple, worker-complex, worker-codex)
+agents/           worker definitions (worker-simple, worker-complex)
 shared/           PLAN.md and CONTRACTS.md, shared by all teams
 ```
 
