@@ -6,7 +6,7 @@
   teams status                          liveness per team, PLAN.md task summary, tail of shared/LOG.md
   teams cost                            token usage per team (lead vs workers, per model); $ if prices_per_mtok is set
   teams learn [team|all] [--force]      MANUAL: scan a team's repo once, one cheap LLM call → rules/<team>.md digest (cached by fingerprint)
-  teams init <repo> [--out f]           MANUAL: scan a repo, propose a teams.json (one team per detected app)
+  teams init <repo>... [--out f]        MANUAL: scan one or more repos, propose a teams.json (one team per detected app; gestion in their common parent)
   teams msg <team> <text...>            type text into a team's terminal (fallback channel)
   teams down                            /exit every team and close their workspaces
   teams add <name> --cwd <dir> [--purpose "..."]   register a new team + prompt stub
@@ -409,25 +409,33 @@ def check_rules_fresh(cfg: dict):
 
 def cmd_init(a):
     """Scan a repo and propose a teams.json (manual; never overwrites without --force)."""
-    root = Path(a.repo).resolve()
+    roots = [Path(r).resolve() for r in a.repo]
+    for r in roots:
+        if not r.is_dir():
+            die(f"not a directory: {r}")
+    root = Path(os.path.commonpath([str(r) for r in roots])) if len(roots) > 1 else roots[0]   # gestion's cwd
     out = Path(a.out).resolve() if a.out else HERE / "teams.json"
     if out.exists() and not a.force:
         die(f"{out} exists — use --force to overwrite, or --out <file>")
     FRONT = {"react", "vue", "svelte", "next", "nuxt", "@angular/core", "solid-js", "astro", "vite"}
     BACK = {"fastapi", "django", "flask", "express", "@nestjs/core", "hono", "koa", "fastify", "laravel/framework", "rails", "gin"}
-    apps = []
-    for pj in list(root.glob("package.json")) + list(root.glob("*/package.json")) + list(root.glob("*/*/package.json")) + \
-              list(root.glob("pyproject.toml")) + list(root.glob("*/pyproject.toml")) + list(root.glob("*/*/pyproject.toml")) + \
-              list(root.glob("composer.json")) + list(root.glob("*/composer.json")):
-        if any(part in SCAN_SKIP for part in pj.parts):
+    apps, seen_dirs = [], set()
+    manifests = []
+    for r in roots:
+        for pat in ("package.json", "*/package.json", "*/*/package.json", "pyproject.toml", "*/pyproject.toml", "*/*/pyproject.toml",
+                    "composer.json", "*/composer.json"):
+            manifests += list(r.glob(pat))
+    for pj in manifests:
+        if any(part in SCAN_SKIP for part in pj.parts) or pj.parent in seen_dirs:
             continue
+        seen_dirs.add(pj.parent)
         d = pj.parent
         deps = set(scan_repo(d)["deps"])
         kind = "frontend" if deps & FRONT else "backend" if deps & BACK else None
         if kind:
             apps.append((kind, d))
     if not apps:
-        die(f"no app detected under {root}")
+        die(f"no app detected under {', '.join(map(str, roots))}")
     teams, seen = [{"name": "gestion", "title": "Gestion", "primary": True, "cwd": os.path.relpath(root, out.parent), "prompt": "gestion.md",
                     "purpose": "Planifie avec l'utilisateur, dispatche, contrôle. Ne code pas.", "add_dirs": []}], {}
     for kind, d in apps:
@@ -793,7 +801,7 @@ def main():
     sub.add_parser("status")
     sub.add_parser("cost")
     s = sub.add_parser("learn"); s.add_argument("team", nargs="?", default="all"); s.add_argument("--model", default="claude-sonnet-5"); s.add_argument("--force", action="store_true"); s.add_argument("--dry-run", action="store_true")
-    s = sub.add_parser("init"); s.add_argument("repo"); s.add_argument("--out"); s.add_argument("--force", action="store_true")
+    s = sub.add_parser("init"); s.add_argument("repo", nargs="+"); s.add_argument("--out"); s.add_argument("--force", action="store_true")
     s = sub.add_parser("msg"); s.add_argument("team"); s.add_argument("text", nargs="+")
     sub.add_parser("down")
     s = sub.add_parser("cmd"); s.add_argument("team")
