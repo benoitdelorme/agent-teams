@@ -30,7 +30,7 @@
   "teams": [
     {
       "name": "gestion",
-      "title": "Gestion",
+      "title": "Michel",
       "primary": true,
       "cwd": "..",
       "prompt": "gestion.md",

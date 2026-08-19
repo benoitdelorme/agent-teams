@@ -5,6 +5,8 @@
                                         --resume: re-attach to a running setup, restart dead sessions with --continue
   teams status                          liveness per team, PLAN.md task summary, tail of shared/LOG.md
   teams cost                            token usage per team (lead vs workers, per model); $ if prices_per_mtok is set
+  teams learn [team|all] [--force]      MANUAL: scan a team's repo once, one cheap LLM call → rules/<team>.md digest (cached by fingerprint)
+  teams init <repo> [--out f]           MANUAL: scan a repo, propose a teams.json (one team per detected app)
   teams msg <team> <text...>            type text into a team's terminal (fallback channel)
   teams down                            /exit every team and close their workspaces
   teams add <name> --cwd <dir> [--purpose "..."]   register a new team + prompt stub
@@ -21,6 +23,27 @@ DEFAULT_CONFIG = HERE / "teams.json"
 STATE = HERE / ".state" / "surfaces.json"
 SESS = HERE / ".state" / "sessions"          # one json per team, written by the hooks
 SELF = Path(__file__).resolve()
+RULES = HERE / "rules"
+
+SCAN_FILES = ["CLAUDE.md", ".claude/CLAUDE.md", "AGENTS.md", "README.md", "readme.md", "CONTRIBUTING.md",
+              "package.json", "pyproject.toml", "composer.json", "go.mod", "Cargo.toml", "Gemfile", "requirements.txt",
+              "tsconfig.json", "tailwind.config.js", "tailwind.config.ts", "tailwind.config.cjs", "postcss.config.js",
+              "vite.config.ts", "vite.config.js", "next.config.js", "next.config.ts", "next.config.mjs", "nuxt.config.ts",
+              "eslint.config.js", "eslint.config.mjs", ".eslintrc", ".eslintrc.json", ".eslintrc.cjs", ".prettierrc", ".prettierrc.json",
+              ".editorconfig", "ruff.toml", "setup.cfg", "pytest.ini", "Makefile", "docker-compose.yml", "Dockerfile", ".env.example"]
+SCAN_SKIP = {"node_modules", ".git", "dist", "build", ".next", ".nuxt", ".venv", "venv", "__pycache__", "vendor", "coverage", ".turbo", ".cache", "target"}
+LEARN_PROMPT = """You are extracting the coding rules of ONE repository for AI coding agents that will edit it.
+Below is a snapshot: key files and dependency list. Produce a digest in EXACTLY this format, in English, max 60 lines total, bullets only, no prose, no headings other than these:
+
+STACK: one line (language, framework, styling/animation/state libs, db, package manager)
+COMMANDS:
+- run: <cmd> | test: <cmd> | lint: <cmd> | build: <cmd> | format: <cmd>   (only those that exist; say "unknown" if not found)
+STRUCTURE: (max 6 lines, only if the docs describe it) where routes/pages, components, models, tests live — path: role; else one line "unknown"
+CONVENTIONS: (max 15 lines) only rules that change how code is written: naming, styling approach (e.g. utility classes vs css modules, fluid type helpers), animation lib, state management, data fetching pattern, error handling, typing strictness, i18n, commit/PR conventions if stated
+NEVER: (max 5 lines) explicit prohibitions found in docs/config (e.g. no inline styles, no default exports, no raw fetch)
+SEE: (max 3 lines) files worth reading before coding, e.g. "CLAUDE.md §Styling", "docs/adr/…" — point, do not copy
+
+Rules: prefer what CLAUDE.md/README/AGENTS.md state over what you infer. If CLAUDE.md exists, do NOT repeat its content — reference it in SEE and only add what it lacks. No speculation: if unknown, write "unknown". Output the digest and nothing else."""
 
 
 # ---------- config -----------------------------------------------------------
@@ -106,7 +129,9 @@ def worker_specs(cfg: dict, team: dict) -> dict:
         for k in ("model", "description"):
             if w.get(k):
                 spec[k] = w[k]
-        vars = {"team": team["name"], "cwd": str(team["cwd_abs"]), "shared_dir": str(cfg["shared_abs"]), **w.get("vars", {})}
+        rules = "\n".join(x for x in [rules_sections(team["name"]), rules_local(team["name"])] if x)
+        vars = {"team": team["name"], "cwd": str(team["cwd_abs"]), "shared_dir": str(cfg["shared_abs"]),
+                "rules": ("REPO RULES (follow strictly; CLAUDE.md wins on conflict):\n" + rules) if rules else "", **w.get("vars", {})}
         spec["prompt"] = render(spec["prompt"], vars)
         spec["description"] = render(spec.get("description", ""), vars)
         specs[name] = spec
@@ -135,15 +160,22 @@ def roster_text(cfg: dict, me: dict, surfaces: dict) -> str:
         tag = " ← you" if t is me else ""
         s = surfaces.get(t["name"], "?")
         brain = t["runner"].get("brain") or t.get("model", cfg["defaults"].get("model", "claude-fable-5"))
-        lines.append(f"- {t['name']}{' (primary)' if t.get('primary') else ''} [{brain}]: {t.get('purpose','')}  cwd={t['cwd_abs']}  surface={s}{tag}")
+        stack = rules_stack(t["name"])
+        lines.append(f"- {t['name']}{' (primary)' if t.get('primary') else ''} [{brain}]: {t.get('purpose','')}  cwd={t['cwd_abs']}  surface={s}{tag}"
+                     + (f"\n    stack: {stack}" if stack else ""))
     return "\n".join(lines)
 
 
 def system_prompt(cfg: dict, team: dict, surfaces: dict) -> str:
+    rules = "\n\n".join(x for x in [
+        ("# REPO RULES (digest generated by `teams learn`; CLAUDE.md in the repo wins on any conflict)\n" + rules_digest(team["name"])) if rules_digest(team["name"]) else "",
+        ("# LOCAL RULES (hand-written, authoritative)\n" + rules_local(team["name"])) if rules_local(team["name"]) else "",
+    ] if x)
     parts = [
         (cfg["_root"] / "prompts" / "_common.md").read_text(),
         workers_text(cfg, team),
         team["prompt_abs"].read_text(),
+        rules,
         roster_text(cfg, team, surfaces),
         (cfg["_root"] / "prompts" / "PROTOCOL.md").read_text(),
     ]
@@ -250,6 +282,170 @@ def shell_line(cmd: list[str]) -> str:
     return " ".join(f'"{c}"' if c.startswith("$(") else shlex.quote(c) for c in cmd)
 
 
+# ---------- rules (manual: teams learn / teams init) -------------------------
+def _read_cap(p: Path, cap: int = 6000) -> str:
+    try:
+        t = p.read_text(errors="replace")
+    except OSError:
+        return ""
+    return t if len(t) <= cap else t[:cap] + f"\n… [truncated {len(t)-cap} chars]"
+
+
+def scan_repo(root: Path) -> dict:
+    files = {}
+    for rel in SCAN_FILES:
+        p = root / rel
+        if p.is_file():
+            files[rel] = _read_cap(p)
+    deps = []
+    pj = root / "package.json"
+    if pj.is_file():
+        try:
+            j = json.loads(pj.read_text())
+            deps += sorted({**j.get("dependencies", {}), **j.get("devDependencies", {})})
+        except json.JSONDecodeError:
+            pass
+    py = root / "pyproject.toml"
+    if py.is_file():
+        txt = py.read_text(errors="replace")
+        for block in re.findall(r'dependencies\s*=\s*\[(.*?)\]', txt, re.S):
+            deps += [m.lower() for m in re.findall(r'["\']([A-Za-z0-9_.-]+)', block)]
+        deps += [m.lower() for m in re.findall(r'^([A-Za-z0-9_.-]+)\s*=\s*[\'"^~>=<{]', txt, re.M) if m not in ("name", "version", "description", "readme", "python")]
+    return {"files": files, "deps": deps}
+
+
+def fingerprint(root: Path) -> str:
+    import hashlib
+    h = hashlib.sha256()
+    for rel in SCAN_FILES:
+        p = root / rel
+        if p.is_file():
+            h.update(rel.encode()); h.update(p.read_bytes())
+    return h.hexdigest()[:16]
+
+
+def rules_paths(name: str) -> tuple[Path, Path]:
+    return RULES / f"{name}.md", RULES / f"{name}.local.md"
+
+
+def rules_fingerprint(name: str) -> str | None:
+    f, _ = rules_paths(name)
+    if not f.is_file():
+        return None
+    m = re.search(r"fingerprint: ([0-9a-f]+)", f.read_text())
+    return m.group(1) if m else None
+
+
+def rules_digest(name: str) -> str:
+    """Generated digest without the header comment (empty if none)."""
+    f, _ = rules_paths(name)
+    if not f.is_file():
+        return ""
+    return re.sub(r"^<!--.*?-->\s*", "", f.read_text(), flags=re.S).strip()
+
+
+def rules_local(name: str) -> str:
+    _, l = rules_paths(name)
+    return l.read_text().strip() if l.is_file() else ""
+
+
+def rules_sections(name: str, wanted=("COMMANDS", "CONVENTIONS", "NEVER")) -> str:
+    """Subset of the digest for workers (they write code; they don't need STRUCTURE/SEE)."""
+    out, keep = [], False
+    for line in rules_digest(name).splitlines():
+        m = re.match(r"^([A-Z]+):", line)
+        if m:
+            keep = m.group(1) in wanted
+        if keep:
+            out.append(line)
+    return "\n".join(out)
+
+
+def rules_stack(name: str) -> str:
+    m = re.search(r"^STACK:\s*(.+)$", rules_digest(name), re.M)
+    return m.group(1).strip() if m else ""
+
+
+def cmd_learn(cfg: dict, a):
+    targets = [t for t in cfg["teams"] if not t.get("primary")] if a.team == "all" else [t for t in cfg["teams"] if t["name"] == a.team]
+    if not targets:
+        die(f"unknown team {a.team}")
+    RULES.mkdir(exist_ok=True)
+    for t in targets:
+        root = t["cwd_abs"]
+        fp = fingerprint(root)
+        f, _ = rules_paths(t["name"])
+        if f.is_file() and rules_fingerprint(t["name"]) == fp and not a.force:
+            print(f"[{t['name']}] rules up to date ({fp}) — use --force to regenerate"); continue
+        snap = scan_repo(root)
+        if not snap["files"] and not snap["deps"]:
+            print(f"[{t['name']}] nothing to learn in {root} (no manifest/README/CLAUDE.md)"); continue
+        body = [f"REPO: {root}", "", "## DEPENDENCIES", ", ".join(snap["deps"]) or "(none)", ""]
+        for rel, txt in snap["files"].items():
+            body += [f"## FILE {rel}", txt, ""]
+        prompt = LEARN_PROMPT + "\n\n" + "\n".join(body)
+        if a.dry_run:
+            print(f"[{t['name']}] would send ~{len(prompt)//4:,} tokens to {a.model} ({len(snap['files'])} files, {len(snap['deps'])} deps)"); continue
+        print(f"[{t['name']}] learning from {root} (~{len(prompt)//4:,} tokens → {a.model}) …")
+        r = subprocess.run(["claude", "-p", "--model", a.model, "--tools", "", "--no-session-persistence", "--output-format", "text"],
+                           input=prompt, capture_output=True, text=True, cwd=str(root))
+        if r.returncode != 0 or not r.stdout.strip():
+            print(f"[{t['name']}] FAILED: {r.stderr.strip()[:300]}"); continue
+        digest = "\n".join(r.stdout.strip().splitlines()[:70])
+        f.write_text(f"<!-- generated by `teams learn` — fingerprint: {fp} — {datetime.now():%Y-%m-%d %H:%M} — model: {a.model} — do not edit; put your own rules in {t['name']}.local.md -->\n{digest}\n")
+        print(f"[{t['name']}] wrote {f.relative_to(HERE)} ({len(digest.splitlines())} lines)")
+
+
+def check_rules_fresh(cfg: dict):
+    for t in cfg["teams"]:
+        if t.get("primary"):
+            continue
+        have = rules_fingerprint(t["name"])
+        if have is None:
+            print(f"[{t['name']}] no rules digest — `teams learn {t['name']}` (manual, optional)")
+        elif have != fingerprint(t["cwd_abs"]):
+            print(f"[{t['name']}] rules digest is STALE (repo config changed) — `teams learn {t['name']} --force`")
+
+
+def cmd_init(a):
+    """Scan a repo and propose a teams.json (manual; never overwrites without --force)."""
+    root = Path(a.repo).resolve()
+    out = Path(a.out).resolve() if a.out else HERE / "teams.json"
+    if out.exists() and not a.force:
+        die(f"{out} exists — use --force to overwrite, or --out <file>")
+    FRONT = {"react", "vue", "svelte", "next", "nuxt", "@angular/core", "solid-js", "astro", "vite"}
+    BACK = {"fastapi", "django", "flask", "express", "@nestjs/core", "hono", "koa", "fastify", "laravel/framework", "rails", "gin"}
+    apps = []
+    for pj in list(root.glob("package.json")) + list(root.glob("*/package.json")) + list(root.glob("*/*/package.json")) + \
+              list(root.glob("pyproject.toml")) + list(root.glob("*/pyproject.toml")) + list(root.glob("*/*/pyproject.toml")) + \
+              list(root.glob("composer.json")) + list(root.glob("*/composer.json")):
+        if any(part in SCAN_SKIP for part in pj.parts):
+            continue
+        d = pj.parent
+        deps = set(scan_repo(d)["deps"])
+        kind = "frontend" if deps & FRONT else "backend" if deps & BACK else None
+        if kind:
+            apps.append((kind, d))
+    if not apps:
+        die(f"no app detected under {root}")
+    teams, seen = [{"name": "gestion", "title": "Gestion", "primary": True, "cwd": os.path.relpath(root, out.parent), "prompt": "gestion.md",
+                    "purpose": "Planifie avec l'utilisateur, dispatche, contrôle. Ne code pas.", "add_dirs": []}], {}
+    for kind, d in apps:
+        n = kind if kind not in seen else f"{kind}-{d.name}"
+        seen[kind] = seen.get(kind, 0) + 1
+        rel = os.path.relpath(d, out.parent)
+        teams.append({"name": n, "title": n.capitalize(), "cwd": rel, "prompt": f"{kind}.md", "purpose": f"{kind} ({d.name})"})
+        teams[0]["add_dirs"].append(rel)
+    cfg = {"$doc": ["generated by `teams init` — review cwd/titles/workers, then `teams learn all`"],
+           "shared_dir": "shared", "permission_mode": "yolo", "shell_prompt_regex": "(➜|→|❯|\\$|%|#) ",
+           "runners": {"claude": {"command": "claude"}},
+           "defaults": {"model": "claude-fable-5", "runner": "claude", "add_dirs": [],
+                        "workers": {"worker-simple": {"model": "claude-sonnet-5"}, "worker-complex": {"model": "claude-opus-5"}}},
+           "teams": teams}
+    out.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + "\n")
+    print(f"wrote {out}\n" + "\n".join(f"  {t['name']:12} {t['cwd']}" for t in teams) + "\nnext: review it, then `teams learn all`")
+
+
 # ---------- programa ---------------------------------------------------------
 def in_programa() -> bool:
     return bool(os.environ.get("PROGRAMA_SURFACE_ID") and os.environ.get("PROGRAMA_SOCKET_PATH"))
@@ -332,6 +528,7 @@ def workspace_surface(ws_ref: str) -> str:
 
 def cmd_up(cfg: dict, a):
     pretrust(cfg)
+    check_rules_fresh(cfg)
     if not a.dry_run:
         preflight_runners(cfg)
     primary = next(t for t in cfg["teams"] if t.get("primary"))
@@ -595,6 +792,8 @@ def main():
     s = sub.add_parser("up"); s.add_argument("--dry-run", action="store_true"); s.add_argument("--resume", action="store_true")
     sub.add_parser("status")
     sub.add_parser("cost")
+    s = sub.add_parser("learn"); s.add_argument("team", nargs="?", default="all"); s.add_argument("--model", default="claude-sonnet-5"); s.add_argument("--force", action="store_true"); s.add_argument("--dry-run", action="store_true")
+    s = sub.add_parser("init"); s.add_argument("repo"); s.add_argument("--out"); s.add_argument("--force", action="store_true")
     s = sub.add_parser("msg"); s.add_argument("team"); s.add_argument("text", nargs="+")
     sub.add_parser("down")
     s = sub.add_parser("cmd"); s.add_argument("team")
@@ -602,8 +801,10 @@ def main():
     a = p.parse_args()
     if a.cmd == "add":
         return cmd_add(a.config, a)
+    if a.cmd == "init":
+        return cmd_init(a)
     cfg = load(a.config)
-    {"up": cmd_up, "status": cmd_status, "cost": cmd_cost, "msg": cmd_msg, "down": cmd_down, "cmd": cmd_cmd}[a.cmd](cfg, a)
+    {"up": cmd_up, "status": cmd_status, "cost": cmd_cost, "learn": cmd_learn, "msg": cmd_msg, "down": cmd_down, "cmd": cmd_cmd}[a.cmd](cfg, a)
 
 
 if __name__ == "__main__":

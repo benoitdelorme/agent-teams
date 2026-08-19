@@ -1,4 +1,5 @@
 __pycache__/
 .state/
+rules/*.local.md
 shared/.roster.json
 shared/LOG.md

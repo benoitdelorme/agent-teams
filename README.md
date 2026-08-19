@@ -28,6 +28,15 @@ bin/teams down     # stops everything
 
 Then describe a feature to gestion and wait.
 
+### Existing projects: teach the teams the repo's rules (manual, one-off)
+
+```bash
+bin/teams learn all        # per team: scan CLAUDE.md/README/manifests/configs → one cheap Sonnet call → rules/<team>.md (≤60 lines)
+bin/teams init <repo>      # propose a teams.json for a repo (one team per detected app), then `learn all`
+```
+
+`rules/<team>.md` is cached by a fingerprint of the repo's config files; `teams up` only warns when it is stale — regenerate with `learn <team> --force`. Put your own rules in `rules/<team>.local.md` (never overwritten). The digest goes to the lead's prompt and, trimmed to commands + conventions, to every worker; gestion only sees each team's stack line. The repo's own `CLAUDE.md` is still loaded by Claude Code and wins on conflict.
+
 While it runs:
 
 ```bash
@@ -57,6 +66,7 @@ teams.json        config
 bin/teams         launcher
 prompts/          how leads work, communication protocol, one role file per team
 agents/           worker definitions (worker-simple, worker-complex)
+rules/            per-team repo digests from `teams learn` (+ your .local.md overrides)
 shared/           PLAN.md, CONTRACTS.md and LOG.md, shared by all teams
 ```
 
