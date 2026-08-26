@@ -10,6 +10,7 @@
     "  `enabled: false` sur une team = ignorée par le lanceur (garde l'exemple sans le lancer).",
     "RUNNERS — quel binaire lance le lead: defaults.runner ou team.runner, clé de `runners` = { command, brain?, drop_flags?, healthcheck?, start? }.",
     "shell_prompt_regex — motif du prompt zsh attendu avant de taper la commande dans un nouveau workspace.",
+    "session_prefix — préfixe du nom de session claude (`claude -n <prefix>-<team>`), par défaut le nom du dossier qui contient teams/: deux projets peuvent lancer leurs teams en même temps sans collision de noms. \"\" désactive le préfixe (session = nom de team).",
     "terminal — \"auto\" (défaut): programa si on tourne dedans, sinon Warp (TERM_PROGRAM=WarpTerminal). Forcer avec \"programa\" | \"warp\". En Warp: 1 onglet par team dans la fenêtre courante, `teams msg` indisponible.",
     "prices_per_mtok — optionnel: { \"<model>\": {\"in\",\"out\",\"cache_read\",\"cache_write\"} } en $/M tokens pour que `teams cost` affiche des dollars.",
     "WORKERS D'ÉCRITURE — worker-writer / worker-researcher / worker-analyst (agents/) : pour les teams qui livrent des documents (marketing). workers_replace: true les isole des workers de code.",

@@ -87,6 +87,26 @@ def die(msg: str, code: int = 1):
     sys.exit(code)
 
 
+def project_slug(cfg: dict) -> str:
+    """Name of the project = the directory CONTAINING teams/, sanitised. Scopes tab configs and session names."""
+    return re.sub(r"[^a-z0-9-]+", "-", cfg["_root"].resolve().parent.name.lower()).strip("-") or "teams"
+
+
+def session_prefix(cfg: dict) -> str:
+    """teams.json "session_prefix": absent -> project slug, "" -> no prefix (session name = team name)."""
+    p = cfg.get("session_prefix")
+    return project_slug(cfg) if p is None else str(p)
+
+
+def session_name(cfg: dict, team: dict) -> str:
+    """`claude -n` name: "<prefix>-<team>", so two projects can run a `backend` team at the same time."""
+    prefix = session_prefix(cfg)
+    name = f"{prefix}-{team['name']}" if prefix else team["name"]
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", name):
+        die(f"invalid session name {name!r} — session_prefix must keep it [A-Za-z0-9][A-Za-z0-9_-]* (\"\" disables it)")
+    return name
+
+
 # ---------- prompt / agents assembly -----------------------------------------
 def parse_agent_md(path: Path) -> tuple[str, dict]:
     text = path.read_text()
@@ -161,13 +181,14 @@ def workers_text(cfg: dict, team: dict) -> str:
 
 
 def roster_text(cfg: dict, me: dict, surfaces: dict) -> str:
-    lines = [f"# ROSTER  (you are: {me['name']})", f"SHARED_DIR: {cfg['shared_abs']}", ""]
+    lines = [f"# ROSTER  (you are: {me['name']})", f"SHARED_DIR: {cfg['shared_abs']}",
+             'Address a team with SendMessage({to: "<session>"}) — the session name, never the bare team name.', ""]
     for t in cfg["teams"]:
         tag = " ← you" if t is me else ""
         s = surfaces.get(t["name"], "?") or "-"          # Warp has no surfaces: null -> "-"
         brain = t["runner"].get("brain") or t.get("model", cfg["defaults"].get("model", "claude-fable-5"))
         stack = rules_stack(t["name"])
-        lines.append(f"- {t['name']}{' (primary)' if t.get('primary') else ''} [{brain}]: {t.get('purpose','')}  cwd={t['cwd_abs']}  surface={s}{tag}"
+        lines.append(f"- {t['name']} session={session_name(cfg, t)}{' (primary)' if t.get('primary') else ''} [{brain}]: {t.get('purpose','')}  cwd={t['cwd_abs']}  surface={s}{tag}"
                      + (f"\n    stack: {stack}" if stack else ""))
     return "\n".join(lines)
 
@@ -199,14 +220,14 @@ def claude_argv(cfg: dict, team: dict, surfaces: dict, inline_agents: bool = Tru
     agents_json = build_agents_json(cfg, team)
     agents_file.write_text(agents_json)
     runner = team["runner"]
-    cmd = [runner.get("command", "claude"), "-n", team["name"],
+    cmd = [runner.get("command", "claude"), "-n", session_name(cfg, team),
            "--model", team.get("model", cfg["defaults"].get("model", "claude-fable-5")),
            "--append-system-prompt-file", str(prompt_file),
            "--agents", agents_json if inline_agents else f"$(cat {shlex.quote(str(agents_file))})",
            "--add-dir", str(cfg["shared_abs"])]
     for d in [*cfg["defaults"].get("add_dirs", []), *team.get("add_dirs", [])]:
         cmd += ["--add-dir", str((cfg["_root"] / d).resolve())]
-    cmd += ["--settings", hook_settings_json(team)]
+    cmd += ["--settings", hook_settings_json(cfg, team)]
     pm = team.get("permission_mode", cfg.get("permission_mode"))
     if pm == "yolo":
         cmd.append("--dangerously-skip-permissions")
@@ -223,9 +244,13 @@ def claude_cmd(cfg: dict, team: dict, surfaces: dict) -> list[str]:
     return claude_argv(cfg, team, surfaces, inline_agents=False)
 
 
-def hook_settings_json(team: dict) -> str:
-    """Claude Code hooks that make each team session report to .state/ — no reliance on prompts."""
-    hook = f"TEAMS_TEAM={shlex.quote(team['name'])} TEAMS_ROOT={shlex.quote(str(HERE))} python3 {shlex.quote(str(SELF))} _hook"
+def hook_settings_json(cfg: dict, team: dict) -> str:
+    """Claude Code hooks that make each team session report to .state/ — no reliance on prompts.
+
+    TEAMS_TEAM is the BARE team name (state files are keyed by it); TEAMS_PREFIX only strips the
+    session prefix off the `to` of a logged SendMessage."""
+    hook = (f"TEAMS_TEAM={shlex.quote(team['name'])} TEAMS_ROOT={shlex.quote(str(HERE))} "
+            f"TEAMS_PREFIX={shlex.quote(session_prefix(cfg))} python3 {shlex.quote(str(SELF))} _hook")
     ev = lambda: [{"matcher": "", "hooks": [{"type": "command", "command": hook, "timeout": 5}]}]
     return json.dumps({"hooks": {
         "SessionStart": ev(), "UserPromptSubmit": ev(), "Stop": ev(), "SessionEnd": ev(),
@@ -266,7 +291,11 @@ def cmd_hook():
             cfg_shared = (root / cfg.get("shared_dir", "shared")).resolve()
         except Exception:
             cfg_shared = root / "shared"
-        line = f"{datetime.now():%H:%M:%S} {team} → {ti.get('to','?')} | {head.strip()}"
+        to = str(ti.get("to", "?"))
+        pre = os.environ.get("TEAMS_PREFIX", "")
+        if pre and to.startswith(pre + "-"):
+            to = to[len(pre) + 1:]                        # LOG.md keeps bare team names: `gestion → backend`
+        line = f"{datetime.now():%H:%M:%S} {team} → {to} | {head.strip()}"
         if body.strip():
             line += f"\n    " + "\n    ".join(l for l in body.strip().splitlines()[:5])
         with open(cfg_shared / "LOG.md", "a") as fh:
@@ -494,6 +523,7 @@ def save_state(d: dict):
 def write_roster_json(cfg: dict, surfaces: dict):
     data = {"shared_dir": str(cfg["shared_abs"]),
             "teams": {t["name"]: {"cwd": str(t["cwd_abs"]), "surface": surfaces.get(t["name"]),
+                                   "session": session_name(cfg, t),
                                    "primary": bool(t.get("primary")), "purpose": t.get("purpose", "")}
                       for t in cfg["teams"]}}
     (cfg["shared_abs"] / ".roster.json").write_text(json.dumps(data, indent=2))
@@ -539,18 +569,13 @@ def terminal_backend(cfg: dict) -> str | None:
     return "warp" if os.environ.get("TERM_PROGRAM") == "WarpTerminal" else None
 
 
-def warp_slug(cfg: dict) -> str:
-    """Name the tab configs after the project (parent of the teams/ dir), so several projects can coexist."""
-    return re.sub(r"[^a-z0-9-]+", "-", cfg["_root"].resolve().parent.name.lower()).strip("-") or "teams"
-
-
 def _tq(s) -> str:
     return '"' + str(s).replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
 def warp_tab_config(cfg: dict, team: dict, cont: bool = False) -> str:
     """Write ~/.warp/tab_configs/<stem>.toml for one team; return the stem (= what warp://tab_config/ matches)."""
-    stem = f"teams-{warp_slug(cfg)}-{team['name']}" + ("-resume" if cont else "")
+    stem = f"teams-{project_slug(cfg)}-{team['name']}" + ("-resume" if cont else "")
     run = shlex.join([str(SELF), "--config", str(cfg["_path"]), "_run", team["name"]] + (["--continue"] if cont else []))
     WARP_TABS.mkdir(parents=True, exist_ok=True)
     (WARP_TABS / f"{stem}.toml").write_text(
@@ -768,7 +793,7 @@ def cmd_up(cfg: dict, a):
             print(f"# {t['name']}  (cd {t['cwd_abs']})")
             print(shell_line(claude_cmd(cfg, t, surfaces)), "\n")
         if a.dry_run and backend == "warp":
-            print(f"# warp: would write {WARP_TABS}/teams-{warp_slug(cfg)}-<team>.toml and open one tab per team")
+            print(f"# warp: would write {WARP_TABS}/teams-{project_slug(cfg)}-<team>.toml and open one tab per team")
         write_roster_json(cfg, surfaces)
         return
     if backend == "warp":
@@ -901,7 +926,7 @@ def cmd_status(cfg: dict, a):
         alive = process_alive(t["name"])
         state = si.get("status", "?") if alive else "DEAD"
         ws = st.get("workspaces", {}).get(t["name"], "?")
-        print(f"  {t['name']:10} {state:8} {ws:14} last {si.get('updated','-')[11:]:8} session {str(si.get('session_id','-'))[:8]}")
+        print(f"  {t['name']:10} {state:8} {ws:14} last {si.get('updated','-')[11:]:8} sid {str(si.get('session_id','-'))[:8]}  {session_name(cfg, t)}")
     print("\n" + plan_summary(cfg))
     log = cfg["shared_abs"] / "LOG.md"
     if log.exists():

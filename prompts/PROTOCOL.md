@@ -3,7 +3,7 @@
 Goal: minimum tokens, zero ambiguity. Silence is the default. A message costs; only send when it changes what the recipient will do.
 
 ## Channel
-1. Primary: `SendMessage({to: "<team>", message})` — team names come from ROSTER. Confirm names once with `ListAgents` at start (match by prefix if suffixed).
+1. Primary: `SendMessage({to: "<session>", message})` — `to` is the `session=` name from ROSTER, never the bare team name. Confirm it once with `ListAgents` at start (match by prefix if suffixed).
 2. Fallback (programa only; if `.roster.json` has no surface, there is no fallback — retry SendMessage after confirming the name with ListAgents): `programa send --surface <surface> "<text>\n"`.
 Never use both for the same message.
 
