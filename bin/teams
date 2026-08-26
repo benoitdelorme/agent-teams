@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
-"""teams — launch/manage a set of Claude Code team sessions inside programa.
+"""teams — launch/manage a set of Claude Code team sessions inside programa or Warp.
 
-  teams up [--dry-run] [--resume]       one named programa workspace per team, claude started in each, primary selected
+  teams up [--dry-run] [--resume]       one programa workspace (or one Warp tab) per team, claude started in each, primary selected
                                         --resume: re-attach to a running setup, restart dead sessions with --continue
+  teams up --only <team>                start ONE team (new/dead) in its own tab, leaving the live ones untouched (Warp only)
   teams status                          liveness per team, PLAN.md task summary, tail of shared/LOG.md
   teams cost                            token usage per team (lead vs workers, per model); $ if prices_per_mtok is set
   teams learn [team|all] [--force]      MANUAL: scan a team's repo once, one cheap LLM call → rules/<team>.md digest (cached by fingerprint)
+                                        a team with "learn": false in teams.json is skipped by `all` and by the staleness check (docs-only team)
   teams init <repo>... [--out f]        MANUAL: scan one or more repos, propose a teams.json (one team per detected app; gestion in their common parent)
-  teams msg <team> <text...>            type text into a team's terminal (fallback channel)
+  teams msg <team> <text...>            type text into a team's terminal (fallback channel; programa only)
   teams task new|set|log|list|show      file-backed tickets in shared/tasks/ (used by gestion and the web board)
   teams board                           start the kanban web UI alone (teams up starts it automatically)
   teams down                            /exit every team, close their workspaces, stop the board
@@ -15,6 +17,7 @@
   teams cmd <team>                      print the exact `claude` command for a team
 
 Config: teams.json next to ../ (see --config). Prompts in prompts/, workers in agents/.
+Terminal: programa when run inside it, else Warp (TERM_PROGRAM=WarpTerminal); force with "terminal" in teams.json.
 """
 import argparse, json, os, re, shlex, signal, subprocess, sys, time
 from datetime import datetime
@@ -29,6 +32,8 @@ STATE = HERE / ".state" / "surfaces.json"
 SESS = HERE / ".state" / "sessions"          # one json per team, written by the hooks
 SELF = Path(__file__).resolve()
 RULES = HERE / "rules"
+WARP_TABS = Path.home() / ".warp" / "tab_configs"   # Warp reads one .toml per tab config from here
+WARP_COLOR = "blue"                                 # same colour on every team tab (Warp cannot group tabs from a file)
 
 SCAN_FILES = ["CLAUDE.md", ".claude/CLAUDE.md", "AGENTS.md", "README.md", "readme.md", "CONTRIBUTING.md",
               "package.json", "pyproject.toml", "composer.json", "go.mod", "Cargo.toml", "Gemfile", "requirements.txt",
@@ -55,6 +60,7 @@ Rules: prefer what CLAUDE.md/README/AGENTS.md state over what you infer. If CLAU
 def load(cfg_path: Path) -> dict:
     cfg = json.loads(cfg_path.read_text())
     cfg["_root"] = cfg_path.parent
+    cfg["_path"] = cfg_path.resolve()
     cfg["shared_abs"] = (cfg["_root"] / cfg.get("shared_dir", "shared")).resolve()
     cfg["teams"] = [t for t in cfg["teams"] if t.get("enabled", True)]
     runners = cfg.setdefault("runners", {"claude": {"command": "claude"}})
@@ -163,7 +169,7 @@ def roster_text(cfg: dict, me: dict, surfaces: dict) -> str:
     lines = [f"# ROSTER  (you are: {me['name']})", f"SHARED_DIR: {cfg['shared_abs']}", ""]
     for t in cfg["teams"]:
         tag = " ← you" if t is me else ""
-        s = surfaces.get(t["name"], "?")
+        s = surfaces.get(t["name"], "?") or "-"          # Warp has no surfaces: null -> "-"
         brain = t["runner"].get("brain") or t.get("model", cfg["defaults"].get("model", "claude-fable-5"))
         stack = rules_stack(t["name"])
         lines.append(f"- {t['name']}{' (primary)' if t.get('primary') else ''} [{brain}]: {t.get('purpose','')}  cwd={t['cwd_abs']}  surface={s}{tag}"
@@ -188,17 +194,21 @@ def system_prompt(cfg: dict, team: dict, surfaces: dict) -> str:
     return "\n\n".join(p.strip() for p in parts)
 
 
-def claude_cmd(cfg: dict, team: dict, surfaces: dict) -> list[str]:
+def claude_argv(cfg: dict, team: dict, surfaces: dict, inline_agents: bool = True) -> list[str]:
+    """Runner argv, and the side effect of writing .state/prompt-<team>.md + agents-<team>.json.
+
+    inline_agents=False replaces the agents JSON by a `$(cat …)` word — only valid through shell_line()."""
     prompt_file = HERE / ".state" / f"prompt-{team['name']}.md"
     prompt_file.parent.mkdir(exist_ok=True)
     prompt_file.write_text(system_prompt(cfg, team, surfaces))
     agents_file = HERE / ".state" / f"agents-{team['name']}.json"
-    agents_file.write_text(build_agents_json(cfg, team))
+    agents_json = build_agents_json(cfg, team)
+    agents_file.write_text(agents_json)
     runner = team["runner"]
     cmd = [runner.get("command", "claude"), "-n", team["name"],
            "--model", team.get("model", cfg["defaults"].get("model", "claude-fable-5")),
            "--append-system-prompt-file", str(prompt_file),
-           "--agents", f"$(cat {shlex.quote(str(agents_file))})",
+           "--agents", agents_json if inline_agents else f"$(cat {shlex.quote(str(agents_file))})",
            "--add-dir", str(cfg["shared_abs"])]
     for d in [*cfg["defaults"].get("add_dirs", []), *team.get("add_dirs", [])]:
         cmd += ["--add-dir", str((cfg["_root"] / d).resolve())]
@@ -212,6 +222,11 @@ def claude_cmd(cfg: dict, team: dict, surfaces: dict) -> list[str]:
         while flag in cmd:
             i = cmd.index(flag); del cmd[i:i + 2]
     return cmd
+
+
+def claude_cmd(cfg: dict, team: dict, surfaces: dict) -> list[str]:
+    """argv for a shell line (agents JSON passed as `$(cat …)` — too big to inline in a typed command)."""
+    return claude_argv(cfg, team, surfaces, inline_agents=False)
 
 
 def hook_settings_json(team: dict) -> str:
@@ -377,7 +392,8 @@ def rules_stack(name: str) -> str:
 
 
 def cmd_learn(cfg: dict, a):
-    targets = [t for t in cfg["teams"] if not t.get("primary")] if a.team == "all" else [t for t in cfg["teams"] if t["name"] == a.team]
+    targets = ([t for t in cfg["teams"] if not t.get("primary") and t.get("learn", True)] if a.team == "all"
+               else [t for t in cfg["teams"] if t["name"] == a.team])
     if not targets:
         die(f"unknown team {a.team}")
     RULES.mkdir(exist_ok=True)
@@ -408,7 +424,7 @@ def cmd_learn(cfg: dict, a):
 
 def check_rules_fresh(cfg: dict):
     for t in cfg["teams"]:
-        if t.get("primary"):
+        if t.get("primary") or not t.get("learn", True):   # "learn": false — team with no repo to digest (docs-only)
             continue
         have = rules_fingerprint(t["name"])
         if have is None:
@@ -520,6 +536,204 @@ def preflight_runners(cfg: dict):
             die(f"runner {name}: still no answer at {url} after start")
 
 
+# ---------- warp ------------------------------------------------------------
+def terminal_backend(cfg: dict) -> str | None:
+    """Which terminal drives the teams. teams.json "terminal": auto (default) | programa | warp."""
+    want = cfg.get("terminal", "auto")
+    if want != "auto":
+        if want not in ("programa", "warp"):
+            die(f'terminal must be "auto", "programa" or "warp", not {want!r}')
+        return want
+    if in_programa():
+        return "programa"
+    return "warp" if os.environ.get("TERM_PROGRAM") == "WarpTerminal" else None
+
+
+def warp_slug(cfg: dict) -> str:
+    """Name the tab configs after the project (parent of the teams/ dir), so several projects can coexist."""
+    return re.sub(r"[^a-z0-9-]+", "-", cfg["_root"].resolve().parent.name.lower()).strip("-") or "teams"
+
+
+def _tq(s) -> str:
+    return '"' + str(s).replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def warp_tab_config(cfg: dict, team: dict, cont: bool = False) -> str:
+    """Write ~/.warp/tab_configs/<stem>.toml for one team; return the stem (= what warp://tab_config/ matches)."""
+    stem = f"teams-{warp_slug(cfg)}-{team['name']}" + ("-resume" if cont else "")
+    run = shlex.join([str(SELF), "--config", str(cfg["_path"]), "_run", team["name"]] + (["--continue"] if cont else []))
+    WARP_TABS.mkdir(parents=True, exist_ok=True)
+    (WARP_TABS / f"{stem}.toml").write_text(
+        f"# generated by `teams up` — regenerated on every run, removed by `teams down`\n"
+        f"name = {_tq(('resume ' if cont else '') + team.get('title', team['name']))}\n"
+        f"title = {_tq(team.get('title', team['name']))}\n"
+        f"color = {_tq(WARP_COLOR)}\n\n"
+        f"[[panes]]\nid = \"main\"\ntype = \"terminal\"\n"
+        f"directory = {_tq(team['cwd_abs'])}\nis_focused = true\n"
+        f"commands = [{_tq(run)}]\n")
+    return stem
+
+
+def warp_open_tab(stem: str):
+    """New tab in the ACTIVE Warp window (no ?new_window=true) — the only documented way to script a tab."""
+    from urllib.parse import quote
+    subprocess.run(["open", f"warp://tab_config/{quote(stem, safe='')}"], check=False)
+    time.sleep(0.6)                                       # let Warp finish the tab before the next URI
+
+
+def warp_state(cfg: dict, stems: dict, **extra) -> dict:
+    return {"terminal": "warp", "started_at": datetime.now().isoformat(timespec="seconds"),
+            "tab_configs": stems, "workspaces": {t["name"]: "warp-tab" for t in cfg["teams"]},
+            "surfaces": {t["name"]: None for t in cfg["teams"]}, **extra}
+
+
+def warp_up(cfg: dict, ordered: list, primary: dict):
+    if load_state():
+        die("teams already up (see .state/surfaces.json) - run `teams down` first, or `teams up --resume`")
+    (cfg["shared_abs"] / "LOG.md").touch()
+    with open(cfg["shared_abs"] / "LOG.md", "a") as fh:
+        fh.write(f"\n## up {datetime.now():%Y-%m-%d %H:%M}\n")
+    surfaces = {t["name"]: None for t in cfg["teams"]}
+    write_roster_json(cfg, surfaces)
+    for f in [*SESS.glob("*.json"), *SESS.glob("*.pid")]:
+        f.unlink()
+    stems = {}
+    for t in ordered:                                     # every roster is written before any claude starts
+        claude_argv(cfg, t, surfaces)
+        stems[t["name"]] = warp_tab_config(cfg, t)
+    save_state(warp_state(cfg, stems))
+    for t in ordered:                                     # primary last -> it is the focused tab
+        warp_open_tab(stems[t["name"]])
+        print(f"[{t['name']}] warp tab {t.get('title', t['name'])!r} ({t['cwd_abs']})")
+    print(f"\n{primary['name']} is the last tab opened, so it has the focus - talk to it there."
+          f"\nWarp cannot group tabs from a config: the {len(ordered)} tabs share the colour {WARP_COLOR}; "
+          f"select them and right-click > New group with tabs to group them.\n`teams down` stops the sessions.")
+
+
+def warp_up_only(cfg: dict, name: str):
+    """Start ONE team in a new Warp tab while the others keep running (a team added to a live setup)."""
+    st = load_state()
+    if not st:
+        die("nothing is up (no state) — run `teams up` to start every team")
+    t = next((x for x in cfg["teams"] if x["name"] == name), None)
+    if t is None:
+        die(f"unknown team {name} (teams: {', '.join(x['name'] for x in cfg['teams'])})")
+    if process_alive(name):
+        die(f"[{name}] is already alive — `teams down` first, or `teams up --resume`")
+    surfaces = st.get("surfaces") or {x["name"]: None for x in cfg["teams"]}
+    surfaces[name] = None
+    write_roster_json(cfg, surfaces)                      # all teams: every roster gains the newcomer
+    for x in cfg["teams"]:                                # refresh every .state/prompt-*.md (files only, no session touched)
+        claude_argv(cfg, x, surfaces)
+    stem = warp_tab_config(cfg, t)
+    st.setdefault("tab_configs", {})[name] = stem
+    st.setdefault("workspaces", {})[name] = "warp-tab"
+    st.setdefault("surfaces", {})[name] = None
+    save_state(st)
+    with open(cfg["shared_abs"] / "LOG.md", "a") as fh:
+        fh.write(f"\n## up --only {name} {datetime.now():%Y-%m-%d %H:%M}\n")
+    warp_open_tab(stem)
+    print(f"[{name}] warp tab {t.get('title', name)!r} ({t['cwd_abs']}) — the other {len(cfg['teams']) - 1} team(s) left running; "
+          f"their prompt files were regenerated with the {len(cfg['teams'])}-team roster (picked up on their next start/--resume).")
+
+
+def warp_resume(cfg: dict, ordered: list, primary: dict):
+    import signal
+    st = load_state()
+    if not st:
+        die("nothing to resume (no state) — run `teams up`")
+    dead = []
+    for t in ordered:
+        if process_alive(t["name"]):
+            print(f"[{t['name']}] alive — untouched")
+        else:
+            dead.append(t)
+    if not dead:
+        print("all teams alive — nothing to resume"); return
+    surfaces = st.get("surfaces") or {t["name"]: None for t in cfg["teams"]}
+    write_roster_json(cfg, surfaces)
+    stems = dict(st.get("tab_configs", {}))
+    for t in dead:
+        shell = tab_shell(t["name"])
+        if shell:
+            try:
+                os.kill(shell, signal.SIGHUP)             # close the tab of the session that died
+            except OSError:
+                pass
+        (SESS / f"{t['name']}.pid").unlink(missing_ok=True)
+        claude_argv(cfg, t, surfaces)
+        stems[t["name"] + "-resume"] = warp_tab_config(cfg, t, cont=True)
+    save_state({**st, "tab_configs": stems})
+    for t in dead:
+        warp_open_tab(stems[t["name"] + "-resume"])
+        print(f"[{t['name']}] restarted with --continue")
+    with open(cfg["shared_abs"] / "LOG.md", "a") as fh:
+        fh.write(f"\n## resume {datetime.now():%Y-%m-%d %H:%M}\n")
+    print(f"\n{len(dead)} tab(s) reopened in the ACTIVE Warp window.")
+
+
+def warp_down(cfg: dict, st: dict):
+    import signal
+    pending = []
+    shells, left = {}, []
+    for name in st.get("workspaces", {}):
+        pidf = SESS / f"{name}.pid"
+        shells[name] = tab_shell(name)
+        try:
+            pid = int(pidf.read_text().splitlines()[0])
+        except (OSError, ValueError, IndexError):
+            print(f"[{name}] no pid recorded"); continue
+        try:
+            os.kill(pid, signal.SIGTERM)
+            pending.append((name, pid))
+        except OSError:
+            print(f"[{name}] already gone")
+        pidf.unlink(missing_ok=True)
+    for name, pid in pending:
+        for _ in range(50):                               # up to 5 s per session, SIGTERM already sent to all
+            time.sleep(0.1)
+            try:
+                os.kill(pid, 0)
+            except OSError:
+                print(f"[{name}] stopped ({pid})"); break
+        else:
+            try:
+                os.kill(pid, signal.SIGKILL); print(f"[{name}] SIGKILL ({pid})")
+            except OSError:
+                print(f"[{name}] stopped ({pid})")
+    for name, shell in shells.items():                    # SIGHUP: an interactive shell ignores SIGTERM
+        if shell:
+            try:
+                os.kill(shell, signal.SIGHUP); print(f"[{name}] tab closed")
+            except OSError:
+                pass
+        else:
+            left.append(name)
+    for stem in st.get("tab_configs", {}).values():
+        (WARP_TABS / f"{stem}.toml").unlink(missing_ok=True)
+    with open(cfg["shared_abs"] / "LOG.md", "a") as fh:
+        fh.write(f"## down {datetime.now():%Y-%m-%d %H:%M}\n")
+    STATE.unlink(missing_ok=True)
+    if left:
+        print(f"close these tabs yourself, their shell is gone: {', '.join(left)}")
+
+
+def cmd_run(cfg: dict, a):
+    """Hidden: what each Warp tab execs. Records its pid, then BECOMES the runner process (same pid)."""
+    team = next((t for t in cfg["teams"] if t["name"] == a.team), None)
+    if team is None:
+        die(f"unknown team {a.team}")
+    argv = claude_argv(cfg, team, load_state().get("surfaces", {}))
+    if a.cont:
+        argv.insert(1, "--continue")
+    SESS.mkdir(parents=True, exist_ok=True)
+    ppid = os.getppid()
+    (SESS / f"{a.team}.pid").write_text(f"{os.getpid()}\n{ppid} {_ps(ppid, 'lstart=')}\n")
+    with open(cfg["shared_abs"] / "LOG.md", "a") as fh:
+        fh.write(f"## run {a.team} {datetime.now():%Y-%m-%d %H:%M}\n")
+    os.execvp(argv[0], argv)
+
+
 # ---------- commands ---------------------------------------------------------
 def wait_shell(ws: str, surf: str, cfg: dict):
     """Block until the shell prompt is visible in a fresh workspace, so a typed command is not lost."""
@@ -547,21 +761,30 @@ def workspace_surface(ws_ref: str) -> str:
 def cmd_up(cfg: dict, a):
     pretrust(cfg)
     check_rules_fresh(cfg)
+    if getattr(a, "only", None):
+        if terminal_backend(cfg) != "warp":
+            die("`up --only` is implemented for Warp only — under programa, run `teams down` then `teams up`")
+        return warp_up_only(cfg, a.only)
     if not a.dry_run:
         preflight_runners(cfg)
     primary = next(t for t in cfg["teams"] if t.get("primary"))
     ordered = [t for t in cfg["teams"] if not t.get("primary")] + [primary]   # primary last -> ends up selected
     surfaces, workspaces = {}, {}
-    if a.dry_run or not in_programa():
+    backend = terminal_backend(cfg)
+    if a.dry_run or backend is None:
         if not a.dry_run:
-            print("Not inside programa - printing commands to run manually (one per terminal):\n")
+            print("No supported terminal (programa / Warp) - printing commands to run manually (one per terminal):\n")
         for t in ordered:
             print(f"# {t['name']}  (cd {t['cwd_abs']})")
             print(shell_line(claude_cmd(cfg, t, surfaces)), "\n")
+        if a.dry_run and backend == "warp":
+            print(f"# warp: would write {WARP_TABS}/teams-{warp_slug(cfg)}-<team>.toml and open one tab per team")
         write_roster_json(cfg, surfaces)
         if not a.dry_run:
             start_board(cfg)
         return
+    if backend == "warp":
+        return warp_resume(cfg, ordered, primary) if a.resume else warp_up(cfg, ordered, primary)
     if a.resume:
         return cmd_resume(cfg, ordered, primary)
     if load_state():
@@ -619,8 +842,32 @@ def surface_tty(ws: str, surf: str) -> str | None:
     return _TTY_CACHE[ws].get(surf)
 
 
+def _ps(pid: int, fmt: str) -> str:
+    return subprocess.run(["ps", "-o", fmt, "-p", str(pid)], capture_output=True, text=True).stdout.strip()
+
+
+def tab_shell(name: str) -> int | None:
+    """The Warp tab's shell recorded by `_run`, only if that exact process is still there (pid reuse guard)."""
+    try:
+        line = (SESS / f"{name}.pid").read_text().splitlines()[1]
+    except (OSError, IndexError):
+        return None
+    pid, _, started = line.partition(" ")
+    return int(pid) if pid.isdigit() and started and _ps(int(pid), "lstart=") == started else None
+
+
 def process_alive(name: str) -> bool:
-    """Alive = a claude process runs on the team's pane tty (robust to programa rewriting argv / --continue)."""
+    """Alive = the pid recorded by `_run` still runs the runner (Warp), else a claude process on the team's
+    pane tty (programa: robust to programa rewriting argv / --continue)."""
+    pidf = SESS / f"{name}.pid"
+    if pidf.exists():
+        try:
+            pid = int(pidf.read_text().splitlines()[0])
+            os.kill(pid, 0)
+        except (ValueError, IndexError, OSError):
+            return False                                  # stale pid file
+        r = subprocess.run(["ps", "-o", "command=", "-p", str(pid)], capture_output=True, text=True)
+        return "claude" in r.stdout
     st = load_state()
     tty = surface_tty(st.get("workspaces", {}).get(name, ""), st.get("surfaces", {}).get(name, ""))
     if tty:
@@ -922,11 +1169,15 @@ def team_target(name: str) -> list[str]:
 
 
 def cmd_msg(cfg: dict, a):
+    if load_state().get("terminal") == "warp" or terminal_backend(cfg) == "warp":
+        die("teams msg needs programa; in Warp, type into the tab or let the sessions use SendMessage")
     programa("send", *team_target(a.team), " ".join(a.text) + "\n")
 
 
 def cmd_down(cfg: dict, a):
     st = load_state()
+    if st.get("terminal") == "warp":
+        return warp_down(cfg, st)
     for name, surf in st.get("surfaces", {}).items():
         programa("send", "--workspace", st["workspaces"][name], "--surface", surf, "/exit\n", check=False)
     for name, ws in st.get("workspaces", {}).items():
@@ -962,7 +1213,7 @@ def main():
     p = argparse.ArgumentParser(prog="teams", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     sub = p.add_subparsers(dest="cmd", required=True)
-    s = sub.add_parser("up"); s.add_argument("--dry-run", action="store_true"); s.add_argument("--resume", action="store_true")
+    s = sub.add_parser("up"); s.add_argument("--dry-run", action="store_true"); s.add_argument("--resume", action="store_true"); s.add_argument("--only", metavar="TEAM")
     sub.add_parser("status")
     sub.add_parser("cost")
     s = sub.add_parser("learn"); s.add_argument("team", nargs="?", default="all"); s.add_argument("--model", default="claude-sonnet-5"); s.add_argument("--force", action="store_true"); s.add_argument("--dry-run", action="store_true")
@@ -978,6 +1229,7 @@ def main():
     sub.add_parser("down")
     s = sub.add_parser("cmd"); s.add_argument("team")
     s = sub.add_parser("add"); s.add_argument("name"); s.add_argument("--cwd", required=True); s.add_argument("--purpose")
+    s = sub.add_parser("_run"); s.add_argument("team"); s.add_argument("--continue", dest="cont", action="store_true")   # hidden: exec'd by a Warp tab
     a = p.parse_args()
     if a.cmd == "add":
         return cmd_add(a.config, a)
@@ -985,7 +1237,7 @@ def main():
         return cmd_init(a)
     cfg = load(a.config)
     {"up": cmd_up, "status": cmd_status, "cost": cmd_cost, "learn": cmd_learn, "msg": cmd_msg, "down": cmd_down,
-     "cmd": cmd_cmd, "task": cmd_task, "board": cmd_board}[a.cmd](cfg, a)
+     "cmd": cmd_cmd, "task": cmd_task, "board": cmd_board, "_run": cmd_run}[a.cmd](cfg, a)
 
 
 if __name__ == "__main__":

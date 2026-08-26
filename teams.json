@@ -1,6 +1,6 @@
 {
   "$doc": [
-    "Config des teams. Chaque team = 1 workspace programa nommé `title`, 1 lead Claude (Fable 5) + des workers.",
+    "Config des teams. Chaque team = 1 workspace programa nommé `title`, 1 lead Claude (gestion sur Fable 5, les autres teams sur Opus 5 via `model` par team) + des workers.",
     "permission_mode: yolo (= --dangerously-skip-permissions) | acceptEdits | default | plan.",
     "WORKERS — catalogue dans defaults.workers, clé = nom du fichier agents/<nom>.md.",
     "  Entrée = { model, description?, vars?, file? }  ou  \"<model>\" (raccourci)  ou  false (retire ce worker pour la team).",
@@ -10,8 +10,11 @@
     "  `enabled: false` sur une team = ignorée par le lanceur (garde l'exemple sans le lancer).",
     "RUNNERS — quel binaire lance le lead: defaults.runner ou team.runner, clé de `runners` = { command, brain?, drop_flags?, healthcheck?, start? }.",
     "shell_prompt_regex — motif du prompt zsh attendu avant de taper la commande dans un nouveau workspace.",
+    "terminal — \"auto\" (défaut): programa si on tourne dedans, sinon Warp (TERM_PROGRAM=WarpTerminal). Forcer avec \"programa\" | \"warp\". En Warp: 1 onglet par team dans la fenêtre courante, `teams msg` indisponible.",
     "prices_per_mtok — optionnel: { \"<model>\": {\"in\",\"out\",\"cache_read\",\"cache_write\"} } en $/M tokens pour que `teams cost` affiche des dollars.",
-    "board — kanban web lancé par `teams up`: { port (0 = port libre choisi par l'OS), jira_base_url (préfixe des liens Jira, ex https://xxx.atlassian.net/browse/) }."
+    "board — kanban web lancé par `teams up`: { port (0 = port libre choisi par l'OS), jira_base_url (préfixe des liens Jira, ex https://xxx.atlassian.net/browse/) }.",
+    "WORKERS D'ÉCRITURE — worker-writer / worker-researcher / worker-analyst (agents/) : pour les teams qui livrent des documents (marketing). workers_replace: true les isole des workers de code.",
+    "`learn: false` sur une team = pas de digest `teams learn` ni d'avertissement de fraîcheur (team qui ne lit pas un repo de code). `bin/teams up --only <team>` démarre une seule team dans son onglet sans toucher aux sessions vivantes (Warp seulement)."
   ],
   "shared_dir": "shared",
   "board": {
@@ -19,6 +22,7 @@
     "jira_base_url": ""
   },
   "permission_mode": "yolo",
+  "terminal": "auto",
   "defaults": {
     "model": "claude-fable-5",
     "add_dirs": [],
@@ -48,6 +52,7 @@
     {
       "name": "backend",
       "title": "xxx - Backend",
+      "model": "claude-opus-5",
       "cwd": "../sample-backend",
       "prompt": "backend.md",
       "purpose": "Server side: API, data, business logic (sample-backend)."
@@ -55,9 +60,33 @@
     {
       "name": "frontend",
       "title": "xxx - Frontend",
+      "model": "claude-opus-5",
       "cwd": "../sample-frontend",
       "prompt": "frontend.md",
       "purpose": "Client side: UI, pages, API consumption (sample-frontend)."
+    },
+    {
+      "name": "marketing",
+      "title": "Marketing",
+      "model": "claude-opus-5",
+      "enabled": false,
+      "cwd": "..",
+      "prompt": "marketing.md",
+      "purpose": "Documents d'affaires et de marketing (plan d'affaires, subventions, positionnement) dans docs/affaires/ et docs/marketing/. Ne touche jamais au code.",
+      "add_dirs": [],
+      "learn": false,
+      "workers_replace": true,
+      "workers": {
+        "worker-writer": {
+          "model": "claude-sonnet-5"
+        },
+        "worker-researcher": {
+          "model": "claude-sonnet-5"
+        },
+        "worker-analyst": {
+          "model": "claude-opus-5"
+        }
+      }
     }
   ],
   "runners": {

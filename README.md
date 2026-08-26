@@ -2,7 +2,7 @@
 
 Run several Claude Code sessions as coordinated teams.
 
-Each team has a lead (Fable 5) that plans and delegates to cheaper workers (Sonnet 5, Opus 5). Teams talk to each other through a strict, low-token protocol. One JSON file configures everything. Runs in [programa](https://github.com/darkroomengineering/programa), one workspace per team.
+Each team has a lead that plans and delegates to cheaper workers (Sonnet 5, Opus 5). The primary lead (gestion, the one you talk to) runs on Fable 5; the other leads run on Opus 5 (`model` per team in teams.json). Teams talk to each other through a strict, low-token protocol. One JSON file configures everything. Runs in [programa](https://github.com/darkroomengineering/programa), one workspace per team.
 
 ## How it works
 
@@ -14,7 +14,7 @@ Messages between teams are one line (`DONE T2 | src/api.py:40 — tests green`).
 ## Requirements
 
 - Claude Code with `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` in `~/.claude/settings.json` → `env`
-- programa (or run `bin/teams up --dry-run` and start the printed commands yourself)
+- programa **or Warp** — auto-detected (`TERM_PROGRAM`); force either with `"terminal"` in `teams.json`. Neither: run `bin/teams up --dry-run` and start the printed commands yourself.
 
 ## Usage
 
@@ -23,10 +23,17 @@ git clone git@github.com:benoitdelorme/agent-teams.git teams
 cd teams
 # edit teams.json: set each team's cwd, title, workers
 bin/teams up       # opens one workspace per team, selects gestion
+bin/teams up --only marketing   # start one team (added or dead) without touching the live ones (Warp only)
 bin/teams down     # stops everything
 ```
 
 Then describe a feature to gestion and wait.
+
+In Warp, `up` opens one tab per team in the **current window** (same tab colour; Warp cannot group tabs from a config — select them and right-click > New group with tabs). Three differences:
+
+- `teams msg` is unsupported (Warp has no API to type into a tab) — the teams talk through `SendMessage`.
+- `teams down` stops the sessions and closes their tabs (Warp has no API for this: it hangs up the tab's shell).
+- `teams up --resume` closes the dead teams' tabs and reopens them, in whatever window is active.
 
 ## The board (kanban web UI)
 
@@ -71,6 +78,7 @@ Everything is in `teams.json`:
 - `runners` — which command starts a lead (`claude` by default)
 - `permission_mode` — `yolo` by default (no prompts)
 - `prices_per_mtok` — optional `{ "<model>": { "in", "out", "cache_read", "cache_write" } }` to get $ in `teams cost`
+- `enabled: false` keeps a sample team (e.g. `marketing`) in the config without launching it; `learn: false` skips it in `teams learn all`
 
 Add a team: `bin/teams add design --cwd ../design`, then edit `prompts/design.md`.
 
@@ -80,7 +88,7 @@ Add a team: `bin/teams add design --cwd ../design`, then edit `prompts/design.md
 teams.json        config
 bin/teams         launcher
 prompts/          how leads work, communication protocol, one role file per team
-agents/           worker definitions (worker-simple, worker-complex)
+agents/           worker definitions (worker-simple, worker-complex + worker-writer, worker-researcher, worker-analyst for documents teams)
 rules/            per-team repo digests from `teams learn` (+ your .local.md overrides)
 shared/           PLAN.md, CONTRACTS.md and LOG.md, shared by all teams
 ```
