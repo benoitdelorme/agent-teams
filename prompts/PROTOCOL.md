@@ -4,7 +4,7 @@ Goal: minimum tokens, zero ambiguity. Silence is the default. A message costs; o
 
 ## Channel
 1. Primary: `SendMessage({to: "<team>", message})` — team names come from ROSTER. Confirm names once with `ListAgents` at start (match by prefix if suffixed).
-2. Fallback (only if SendMessage errors): `programa send --surface <surface> "<text>\n"` using surfaces from `shared/.roster.json`.
+2. Fallback (programa only; if `.roster.json` has no surface, there is no fallback — retry SendMessage after confirming the name with ListAgents): `programa send --surface <surface> "<text>\n"`.
 Never use both for the same message.
 
 ## Message format — one message = one line header + optional body
@@ -33,6 +33,7 @@ Types (the only ones allowed):
 - Do not reply to DONE, ANSWER, or STATUS answers.
 - Detail lives in files, not messages: plan/status in `shared/PLAN.md`, API shapes in `shared/CONTRACTS.md`. Update the file, then send the 1-line pointer.
 - Do not poll. Replies arrive as new turns in your session; end your turn and wait. STATUS at most once per task, only if a DONE/BLOCKED is overdue.
+- Only gestion talks to the human. A question for the human from any other team = one batched `ASK gestion`; gestion asks, then `ANSWER`s. Never wait for the human in your own tab.
 - Language: messages in English (denser). Talk to the human in French.
 
 ## Examples
