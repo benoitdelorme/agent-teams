@@ -77,6 +77,7 @@ Everything is in `teams.json`:
 - `workers` — per team: add, override or remove workers from the catalogue in `agents/`
 - `runners` — which command starts a lead (`claude` by default)
 - `permission_mode` — `yolo` by default (no prompts)
+- `session_prefix` — default is the project folder name; sessions are named `<prefix>-<team>` (`claude -n`) so several projects can run their teams at once. `""` to disable
 - `prices_per_mtok` — optional `{ "<model>": { "in", "out", "cache_read", "cache_write" } }` to get $ in `teams cost`
 - `enabled: false` keeps a sample team (e.g. `marketing`) in the config without launching it; `learn: false` skips it in `teams learn all`
 
