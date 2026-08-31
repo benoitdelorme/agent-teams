@@ -560,7 +560,7 @@ def cmd_up(cfg: dict, a):
             print(shell_line(claude_cmd(cfg, t, surfaces)), "\n")
         write_roster_json(cfg, surfaces)
         if not a.dry_run:
-            start_board()
+            start_board(cfg)
         return
     if a.resume:
         return cmd_resume(cfg, ordered, primary)
@@ -587,8 +587,8 @@ def cmd_up(cfg: dict, a):
         wait_shell(workspaces[t["name"]], surfaces[t["name"]], cfg)
         programa("send", "--workspace", workspaces[t["name"]], "--surface", surfaces[t["name"]],
                  shell_line(claude_cmd(cfg, t, surfaces)) + "\n")
+    start_board(cfg)
     programa("select-workspace", "--workspace", workspaces[primary["name"]], check=False)
-    start_board()
     print(f"\n{primary['name']} is selected - talk to it there. `teams down` closes everything.")
 
 
@@ -650,6 +650,7 @@ def plan_summary(cfg: dict) -> str:
 # ---------- board (kanban web UI) --------------------------------------------
 BOARD_BIN = Path(__file__).resolve().parent / "teams-board"
 BOARD_STATE = HERE / ".state" / "board.json"
+BOARD_WS = HERE / ".state" / "board-ws.json"       # programa workspace hosting the server (separate from surfaces.json so `up` guards stay valid)
 
 
 def board_state() -> dict:
@@ -670,23 +671,43 @@ def board_alive(st: dict | None = None) -> bool:
         return False
 
 
-def start_board():
+def board_ws_state() -> dict:
+    try:
+        return json.loads(BOARD_WS.read_text())
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def start_board(cfg: dict, port: int | None = None):
+    """Start the board server. Inside programa it MUST live in a real pane (a detached/orphaned
+    process gets 'Broken pipe' from `programa send`, so it could never wake gestion) — we give it
+    a dedicated 'Board' workspace, which also makes its logs visible. Outside programa: detached."""
     st = board_state()
     if board_alive(st):
         print(f"board → {st.get('url')} (already running)")
         return
     BOARD_STATE.parent.mkdir(exist_ok=True)
     BOARD_STATE.unlink(missing_ok=True)
-    log = open(HERE / ".state" / "board.log", "ab")
-    subprocess.Popen([sys.executable, str(BOARD_BIN), "--root", str(HERE)],
-                     stdout=log, stderr=log, start_new_session=True)
-    for _ in range(30):
+    cmd = [sys.executable, str(BOARD_BIN), "--root", str(HERE)] + (["--port", str(port)] if port else [])
+    if in_programa():
+        bws = board_ws_state()
+        if not bws.get("workspace") or not workspace_exists(bws["workspace"]):
+            ws = programa("new-workspace", "--name", "Board", "--cwd", str(HERE),
+                          "--description", "kanban web UI — teams-board server").split()[1]
+            bws = {"workspace": ws, "surface": workspace_surface(ws)}
+            BOARD_WS.write_text(json.dumps(bws, indent=2))
+        wait_shell(bws["workspace"], bws["surface"], cfg)
+        programa("send", "--workspace", bws["workspace"], "--surface", bws["surface"], shell_line(cmd) + "\n")
+    else:
+        log = open(HERE / ".state" / "board.log", "ab")
+        subprocess.Popen(cmd, stdout=log, stderr=log, start_new_session=True)
+    for _ in range(60):
         time.sleep(0.1)
         st = board_state()
         if st.get("url") and board_alive(st):
             print(f"board → {st['url']}")
             return
-    print("board: failed to start — see .state/board.log")
+    print("board: failed to start — see the Board workspace (or .state/board.log)")
 
 
 def stop_board():
@@ -698,10 +719,14 @@ def stop_board():
         except OSError:
             pass
     BOARD_STATE.unlink(missing_ok=True)
+    bws = board_ws_state()
+    if bws.get("workspace") and in_programa():
+        programa("close-workspace", "--workspace", bws["workspace"], check=False)
+    BOARD_WS.unlink(missing_ok=True)
 
 
 def cmd_board(cfg: dict, a):
-    start_board()
+    start_board(cfg, port=a.port)
 
 
 # ---------- tickets (teams task …) -------------------------------------------
@@ -788,8 +813,8 @@ def cmd_resume(cfg: dict, ordered: list, primary: dict):
         print(f"[{n}] restarted with --continue")
     with open(cfg["shared_abs"] / "LOG.md", "a") as fh:
         fh.write(f"\n## resume {datetime.now():%Y-%m-%d %H:%M}\n")
+    start_board(cfg)
     programa("select-workspace", "--workspace", workspaces[primary["name"]], check=False)
-    start_board()
 
 
 def usage_of(path: Path) -> dict:
@@ -910,7 +935,7 @@ def main():
     x = tsub.add_parser("log"); x.add_argument("id"); x.add_argument("text", nargs="+")
     x = tsub.add_parser("list"); x.add_argument("--status", choices=tasklib.STATUSES)
     x = tsub.add_parser("show"); x.add_argument("id")
-    sub.add_parser("board")
+    s = sub.add_parser("board"); s.add_argument("--port", type=int)
     sub.add_parser("down")
     s = sub.add_parser("cmd"); s.add_argument("team")
     s = sub.add_parser("add"); s.add_argument("name"); s.add_argument("--cwd", required=True); s.add_argument("--purpose")

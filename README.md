@@ -35,7 +35,7 @@ Then describe a feature to gestion and wait.
 - **Files are the source of truth.** One ticket = one markdown file `shared/tasks/T<n>.md` (frontmatter + `## Description / ## Criteria / ## Log`). The board watches them and updates live over SSE; agents just edit files.
 - **Two entry doors, one data path.** Create tickets on the board (backlog → groom → drag to TODO, which wakes gestion with one line typed in its terminal) or talk to gestion, which creates the same files via `teams task new`. Ids (`T<n>`) come from one atomic counter — a Jira key is an optional label on top (`board.jira_base_url` in teams.json makes it a link).
 - **Traces for free.** The SendMessage hook mirrors every `TASK/DONE/BLOCKED T<n>` message into the ticket's `## Log` and updates its status (TASK→doing, DONE→qa, BLOCKED→flag). Backlog is never read by gestion.
-- Zero dependency: the server is stdlib Python (`bin/teams-board`), the UI one static HTML file. `teams board` starts it alone; `teams down` stops it.
+- Zero dependency: the server is stdlib Python (`bin/teams-board`), the UI one static HTML file. Inside programa it runs in its own "Board" workspace (required: `programa send` only accepts clients living in a real pane, so a detached server could not wake gestion). `teams board [--port N]` starts it alone; `teams down` stops it and closes the workspace.
 
 ```bash
 bin/teams task new "Fix login redirect" --jira LUM-482   # → T7
