@@ -62,21 +62,48 @@ def api_state() -> dict:
 
 
 # ---------- wake gestion ------------------------------------------------------
-def notify_gestion(text: str) -> bool:
-    """Type one line into gestion's terminal (best effort; silently off outside programa)."""
+PENDING = []              # notifications that failed to send; the watcher retries them
+PENDING_LOCK = threading.Lock()
+
+
+def _send_gestion(text: str) -> bool:
     if not CTX["primary"]:
-        return False
+        return True                              # nowhere to send — don't queue forever
     try:
         st = json.loads((CTX["state"] / "surfaces.json").read_text())
         ws = st["workspaces"][CTX["primary"]]
         surf = st["surfaces"][CTX["primary"]]
     except (OSError, KeyError, json.JSONDecodeError):
-        return False
+        return True                              # teams not up — drop silently (board works standalone)
     r = subprocess.run(["programa", "send", "--workspace", ws, "--surface", surf, text + "\n"],
                        capture_output=True, text=True)
     if r.returncode != 0:
-        print(f"notify failed: {r.stderr.strip()[:200]}", file=sys.stderr)
+        print(f"notify failed (will retry): {r.stderr.strip()[:200]}", file=sys.stderr)
     return r.returncode == 0
+
+
+def notify_gestion(text: str):
+    """Type one line into gestion's terminal, off the request thread. Transient socket
+    failures happen (the board is a detached process): retry immediately twice, then hand
+    over to the watcher's retry queue so a wake-up is never lost while the board lives."""
+    def run():
+        for delay in (0, 0.5, 1.5):
+            time.sleep(delay)
+            if _send_gestion(text):
+                return
+        with PENDING_LOCK:
+            PENDING.append(text)
+    threading.Thread(target=run, daemon=True).start()
+
+
+def retry_pending():
+    with PENDING_LOCK:
+        items, PENDING[:] = PENDING[:], []
+    for text in items:
+        if not _send_gestion(text):
+            with PENDING_LOCK:
+                PENDING.append(text)
+            return                               # still down — keep order, try again next tick
 
 
 # ---------- SSE hub + file watcher -------------------------------------------
@@ -110,9 +137,12 @@ HUB = Hub()
 def watcher():
     """Poll mtimes of tasks/ and sessions/ every 500 ms; broadcast diffs as SSE events."""
     seen_tasks, seen_sess = {}, None
-    first = True
+    first, tick = True, 0
     while True:
         try:
+            tick += 1
+            if tick % 10 == 0:
+                retry_pending()
             cur = {}
             for p in tasklib.tasks_dir(CTX["shared"]).glob("T*.md"):
                 try:
