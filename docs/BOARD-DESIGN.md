@@ -36,11 +36,12 @@ Format d'un ticket (`shared/tasks/T3.md`) :
 
 ```markdown
 ---
-id: T3
+id: T3                    # numéro interne, TOUJOURS présent (voir §2.1)
 title: Auth layer frontend
 team: frontend            # ou "-" tant que non assigné
 status: doing             # backlog | todo | doing | qa | done
 blocked: false            # badge rouge, pas une colonne
+jira: LUM-482             # référence externe, OPTIONNELLE (absente si pas de ticket Jira)
 created: 2026-08-31T15:20
 updated: 2026-08-31T16:02
 by: human                 # human | gestion
@@ -58,6 +59,26 @@ Contexte / but, écrit par l'humain (UI) ou gestion.
 - 16:41 frontend → gestion | DONE T3 | lib/auth.tsx, pages/Login.tsx — build green
 - 16:45 gestion: spot-check ok, moved to qa
 ```
+
+### 2.1 Numéro interne obligatoire, référence externe optionnelle
+
+Tout ticket a **quoi qu'il arrive un numéro interne** `T<n>`, attribué à la création par
+`shared/tasks/.counter` (incrément atomique : lecture + écriture sous `os.rename`, que le
+créateur soit le serveur web ou gestion). C'est lui qui fait foi partout :
+
+- **`id` = identité canonique** : nom du fichier (`T<n>.md`), `<ref>` du protocole
+  (TASK T3, DONE T3…), clé du `## Log`, cible des hooks. Jamais réutilisé, jamais
+  renuméroté, indépendant de tout outil externe.
+- **`jira` = simple étiquette** (optionnelle) : posée à la création ou après coup dans la
+  modale. Le système ne s'en sert pour rien — les agents et les hooks ne raisonnent que
+  sur `T<n>`. L'UI l'affiche sur la carte à côté du numéro interne (`T3 · LUM-482`) et en
+  fait un lien cliquable si `teams.json` définit `board.jira_base_url`
+  (`https://xxx.atlassian.net/browse/`). Recherche/filtre par l'un ou l'autre.
+- Extensible sans migration : le jour où il faut GitHub/Linear, on ajoute une clé
+  (`github: #142`) — même statut de simple étiquette, l'`id` interne reste le pivot.
+
+Une tâche née dans le terminal (gestion) et une tâche née dans l'UI piochent dans le même
+compteur : pas de collision, une seule séquence.
 
 - Le kanban = le champ `status` du frontmatter. Déplacer une carte = réécrire une ligne.
 - **La trace vit dans `## Log`** : elle est alimentée automatiquement (voir §5) et
@@ -163,8 +184,8 @@ même serveur, même API ; la frontière API/SSE rend le swap indolore.)
 - **Modale ticket** : frontmatter éditable (titre, team, blocked), description/criteria,
   et le `## Log` rendu en flux type chat qui **s'allonge en live** pendant que les agents
   travaillent. Zone commentaire humain en bas.
-- **Création** : bouton `+` en Backlog, input inline (titre, Entrée = créé), détail dans
-  la modale.
+- **Création** : bouton `+` en Backlog, input inline (titre, Entrée = créé — le serveur
+  attribue le `T<n>` et le renvoie), détail et champ Jira optionnel dans la modale.
 - **Live** : `EventSource` avec reconnexion auto ; à la reconnexion un `GET /api/tasks`
   resynchronise. Pas de websocket : SSE suffit (flux unidirectionnel serveur→UI, les
   écritures passent par l'API).
@@ -176,10 +197,10 @@ même serveur, même API ; la frontière API/SSE rend le swap indolore.)
 | `bin/teams` | `cmd_up`/`cmd_down`/`resume` : start/stop du board, print de l'URL ; hook : append au `## Log` du ticket + règles blocked/qa ; `plan_summary()` lit `shared/tasks/` |
 | `bin/teams-board` | **nouveau** — serveur HTTP+SSE+watch (stdlib) |
 | `board.html` (dans bin/ ou tools/board/) | **nouveau** — l'UI |
-| `prompts/gestion.md` | tickets fichiers au lieu de la table PLAN.md ; « ignore status: backlog » ; poser doing/qa/done |
+| `prompts/gestion.md` | tickets fichiers au lieu de la table PLAN.md ; attribuer `T<n>` via `.counter` ; « ignore status: backlog » ; poser doing/qa/done |
 | `prompts/PROTOCOL.md` | `<ref>` pointe vers `shared/tasks/T<n>.md` ; une ligne sur les statuts |
 | `.gitignore` | `shared/tasks/` (contenu runtime, comme LOG.md) |
-| `teams.json` | optionnel : `board: {"port": 0, "open": false}` |
+| `teams.json` | optionnel : `board: {"port": 0, "open": false, "jira_base_url": "https://…/browse/"}` |
 
 ## 8. Coût, perf, risques
 
