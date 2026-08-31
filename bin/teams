@@ -650,7 +650,7 @@ def plan_summary(cfg: dict) -> str:
 # ---------- board (kanban web UI) --------------------------------------------
 BOARD_BIN = Path(__file__).resolve().parent / "teams-board"
 BOARD_STATE = HERE / ".state" / "board.json"
-BOARD_WS = HERE / ".state" / "board-ws.json"       # programa workspace hosting the server (separate from surfaces.json so `up` guards stay valid)
+BOARD_WS = HERE / ".state" / "board-ws.json"       # programa surface (tab) hosting the server (separate from surfaces.json so `up` guards stay valid)
 
 
 def board_state() -> dict:
@@ -678,10 +678,42 @@ def board_ws_state() -> dict:
         return {}
 
 
+def surface_exists(ws: str, surf: str) -> bool:
+    try:
+        data = json.loads(programa("--json", "tree", "--workspace", ws, check=False) or "{}")
+    except json.JSONDecodeError:
+        return False
+    return any(sf.get("ref") == surf
+               for w in data.get("windows", []) for x in w.get("workspaces", [])
+               for pane in x.get("panes", []) for sf in pane.get("surfaces", []))
+
+
+def gestion_pane(cfg: dict) -> tuple[str | None, str | None]:
+    """(workspace, pane) of the primary team's session, from the recorded surfaces."""
+    st = load_state()
+    primary = next((t["name"] for t in cfg["teams"] if t.get("primary")), None)
+    ws, surf = st.get("workspaces", {}).get(primary), st.get("surfaces", {}).get(primary)
+    if not ws or not surf:
+        return None, None
+    try:
+        data = json.loads(programa("--json", "tree", "--workspace", ws, check=False) or "{}")
+    except json.JSONDecodeError:
+        return None, None
+    for w in data.get("windows", []):
+        for x in w.get("workspaces", []):
+            if x.get("ref") != ws:
+                continue
+            for pane in x.get("panes", []):
+                if any(sf.get("ref") == surf for sf in pane.get("surfaces", [])):
+                    return ws, pane.get("ref")
+    return ws, None
+
+
 def start_board(cfg: dict, port: int | None = None):
     """Start the board server. Inside programa it MUST live in a real pane (a detached/orphaned
-    process gets 'Broken pipe' from `programa send`, so it could never wake gestion) — we give it
-    a dedicated 'Board' workspace, which also makes its logs visible. Outside programa: detached."""
+    process gets 'Broken pipe' from `programa send`, so it could never wake gestion) — it runs as
+    an extra TAB in gestion's pane (fallback: the current pane), so it adds no workspace.
+    Outside programa: detached subprocess (board usable, no wake)."""
     st = board_state()
     if board_alive(st):
         print(f"board → {st.get('url')} (already running)")
@@ -691,13 +723,23 @@ def start_board(cfg: dict, port: int | None = None):
     cmd = [sys.executable, str(BOARD_BIN), "--root", str(HERE)] + (["--port", str(port)] if port else [])
     if in_programa():
         bws = board_ws_state()
-        if not bws.get("workspace") or not workspace_exists(bws["workspace"]):
-            ws = programa("new-workspace", "--name", "Board", "--cwd", str(HERE),
-                          "--description", "kanban web UI — teams-board server").split()[1]
-            bws = {"workspace": ws, "surface": workspace_surface(ws)}
+        if not (bws.get("workspace") and bws.get("surface") and surface_exists(bws["workspace"], bws["surface"])):
+            ws, pane = gestion_pane(cfg)
+            args = ["new-surface"]
+            if ws and pane:                                   # tab next to gestion's session
+                args += ["--workspace", ws, "--pane", pane]
+            out = programa(*args)                             # "OK surface:55 pane:27 workspace:36"
+            surf = next((p for p in out.split() if p.startswith("surface:")), None)
+            ws = next((p for p in out.split() if p.startswith("workspace:")),
+                      ws or os.environ.get("PROGRAMA_WORKSPACE_ID", ""))
+            if not surf:
+                die(f"could not parse new-surface output: {out!r}")
+            bws = {"surface": surf, "workspace": ws}
+            programa("rename-tab", "--workspace", ws, "--surface", surf, "board", check=False)
             BOARD_WS.write_text(json.dumps(bws, indent=2))
         wait_shell(bws["workspace"], bws["surface"], cfg)
-        programa("send", "--workspace", bws["workspace"], "--surface", bws["surface"], shell_line(cmd) + "\n")
+        programa("send", "--workspace", bws["workspace"], "--surface", bws["surface"],
+                 f"cd {shlex.quote(str(HERE))} && clear && " + shell_line(cmd) + "\n")
     else:
         log = open(HERE / ".state" / "board.log", "ab")
         subprocess.Popen(cmd, stdout=log, stderr=log, start_new_session=True)
@@ -707,7 +749,7 @@ def start_board(cfg: dict, port: int | None = None):
         if st.get("url") and board_alive(st):
             print(f"board → {st['url']}")
             return
-    print("board: failed to start — see the Board workspace (or .state/board.log)")
+    print("board: failed to start — see the board tab in gestion's pane (or .state/board.log)")
 
 
 def stop_board():
@@ -719,10 +761,7 @@ def stop_board():
         except OSError:
             pass
     BOARD_STATE.unlink(missing_ok=True)
-    bws = board_ws_state()
-    if bws.get("workspace") and in_programa():
-        programa("close-workspace", "--workspace", bws["workspace"], check=False)
-    BOARD_WS.unlink(missing_ok=True)
+    # the tab itself is left as a plain shell; it goes away with its workspace on `teams down`
 
 
 def cmd_board(cfg: dict, a):

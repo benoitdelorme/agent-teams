@@ -126,12 +126,13 @@ Un seul fichier `bin/teams-board` (~400 lignes), ou une commande de `bin/teams` 
 
 ### Cycle de vie
 
-- `teams up` : lance le serveur **dans un workspace programa dédié « Board »** et imprime
-  `board → http://127.0.0.1:xxxxx` dans le terminal qui a fait le up. Contrainte découverte
-  à l'implémentation : `programa send` refuse les clients orphelins (hors arbre d'un pane
-  vivant) — un serveur détaché ne peut donc jamais réveiller gestion. Le pane Board règle
-  ça et rend les logs du serveur visibles. Hors programa : subprocess détaché (pas de
-  réveil, le board reste utilisable en lecture/écriture).
+- `teams up` : lance le serveur **dans un onglet « board » du pane de gestion** (via
+  `programa new-surface --pane`) et imprime `board → http://127.0.0.1:xxxxx` dans le
+  terminal qui a fait le up. Contrainte découverte à l'implémentation : `programa send`
+  refuse les clients orphelins (hors arbre d'un pane vivant) — un serveur détaché ne peut
+  donc jamais réveiller gestion. L'onglet règle ça sans ajouter de workspace, et rend les
+  logs du serveur visibles. Hors programa : subprocess détaché (pas de réveil, le board
+  reste utilisable en lecture/écriture).
 - `teams down` : tue le pid de `.state/board.json`.
 - `teams board` : lancer/relancer seul (utile hors programa) ; `teams up --resume`
   relance s'il est mort.
