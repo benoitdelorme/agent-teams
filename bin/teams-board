@@ -1,0 +1,337 @@
+#!/usr/bin/env python3
+"""teams-board — local kanban web UI bound live to SHARED_DIR/tasks/*.md.
+
+Zero dependency (stdlib only). The files are the source of truth: this server is a view
+plus a pen. It watches mtimes (2×/s) and pushes SSE; UI writes go through the same
+tasklib the CLI and hooks use. Moving a ticket to `todo` from the UI wakes gestion by
+typing one line into its terminal via `programa send` (same channel as `teams msg`).
+
+Started by `teams up` (detached, port picked by the OS, url in .state/board.json) or
+standalone: `bin/teams-board --root <teams dir>`.
+"""
+import argparse, json, os, re, signal, subprocess, sys, threading, time, queue
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import tasklib
+
+CTX = {}          # root, shared, cfg, url — filled in main()
+
+
+# ---------- config / state ---------------------------------------------------
+def load_ctx(root: Path):
+    cfg = json.loads((root / "teams.json").read_text())
+    shared = (root / cfg.get("shared_dir", "shared")).resolve()
+    primary = next((t["name"] for t in cfg.get("teams", []) if t.get("primary")), None)
+    CTX.update(root=root, cfg=cfg, shared=shared, primary=primary,
+               board=cfg.get("board", {}), state=root / ".state")
+
+
+def sessions_state() -> list:
+    out = []
+    for t in CTX["cfg"].get("teams", []):
+        if not t.get("enabled", True):
+            continue
+        f = CTX["state"] / "sessions" / f"{t['name']}.json"
+        si = {}
+        try:
+            si = json.loads(f.read_text()) if f.exists() else {}
+        except (OSError, json.JSONDecodeError):
+            pass
+        out.append({"name": t["name"], "title": t.get("title", t["name"]), "primary": bool(t.get("primary")),
+                    "purpose": t.get("purpose", ""), "status": si.get("status", "gone"), "updated": si.get("updated", "")})
+    return out
+
+
+def plan_title() -> str:
+    f = CTX["shared"] / "PLAN.md"
+    try:
+        for l in f.read_text().splitlines():
+            if l.startswith("# "):
+                return re.sub(r"^Feature:\s*", "", l[2:]).strip()
+    except OSError:
+        pass
+    return ""
+
+
+def api_state() -> dict:
+    return {"plan_title": plan_title(), "url": CTX.get("url", ""),
+            "jira_base_url": CTX["board"].get("jira_base_url", ""),
+            "teams": sessions_state(), "statuses": tasklib.STATUSES}
+
+
+# ---------- wake gestion ------------------------------------------------------
+def notify_gestion(text: str) -> bool:
+    """Type one line into gestion's terminal (best effort; silently off outside programa)."""
+    if not CTX["primary"]:
+        return False
+    try:
+        st = json.loads((CTX["state"] / "surfaces.json").read_text())
+        ws = st["workspaces"][CTX["primary"]]
+        surf = st["surfaces"][CTX["primary"]]
+    except (OSError, KeyError, json.JSONDecodeError):
+        return False
+    r = subprocess.run(["programa", "send", "--workspace", ws, "--surface", surf, text + "\n"],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        print(f"notify failed: {r.stderr.strip()[:200]}", file=sys.stderr)
+    return r.returncode == 0
+
+
+# ---------- SSE hub + file watcher -------------------------------------------
+class Hub:
+    def __init__(self):
+        self.clients, self.lock = set(), threading.Lock()
+
+    def attach(self):
+        q = queue.Queue(maxsize=200)
+        with self.lock:
+            self.clients.add(q)
+        return q
+
+    def detach(self, q):
+        with self.lock:
+            self.clients.discard(q)
+
+    def send(self, event: str, data):
+        msg = (event, json.dumps(data, ensure_ascii=False))
+        with self.lock:
+            for q in list(self.clients):
+                try:
+                    q.put_nowait(msg)
+                except queue.Full:
+                    self.clients.discard(q)
+
+
+HUB = Hub()
+
+
+def watcher():
+    """Poll mtimes of tasks/ and sessions/ every 500 ms; broadcast diffs as SSE events."""
+    seen_tasks, seen_sess = {}, None
+    first = True
+    while True:
+        try:
+            cur = {}
+            for p in tasklib.tasks_dir(CTX["shared"]).glob("T*.md"):
+                try:
+                    cur[p.stem] = p.stat().st_mtime_ns
+                except OSError:
+                    pass
+            if not first:
+                for tid in seen_tasks.keys() - cur.keys():
+                    HUB.send("task-deleted", {"id": tid})
+                for tid, mt in cur.items():
+                    if seen_tasks.get(tid) != mt:
+                        try:
+                            HUB.send("task", tasklib.load(CTX["shared"], tid))
+                        except (OSError, ValueError):
+                            pass
+            seen_tasks = cur
+
+            sd = CTX["state"] / "sessions"
+            sig = tuple(sorted((p.name, p.stat().st_mtime_ns) for p in sd.glob("*.json"))) if sd.is_dir() else ()
+            if not first and sig != seen_sess:
+                HUB.send("state", api_state())
+            seen_sess, first = sig, False
+        except Exception as e:                                     # the watcher must never die
+            print(f"watcher: {e}", file=sys.stderr)
+        time.sleep(0.5)
+
+
+# ---------- HTTP -------------------------------------------------------------
+class Handler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+    server_version = "teams-board"
+
+    def log_message(self, fmt, *args):                              # quiet access log
+        pass
+
+    # helpers
+    def _json(self, code: int, data):
+        raw = json.dumps(data, ensure_ascii=False).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(raw)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(raw)
+
+    def _err(self, code: int, msg: str):
+        self._json(code, {"error": msg})
+
+    def _body(self) -> dict:
+        n = int(self.headers.get("Content-Length") or 0)
+        if n > 1_000_000:
+            raise ValueError("body too large")
+        d = json.loads(self.rfile.read(n) or b"{}")
+        if not isinstance(d, dict):
+            raise ValueError("expected a JSON object")
+        return d
+
+    def _tid(self) -> str | None:
+        m = re.fullmatch(r"/api/tasks/(T\d+)(/comment)?", self.path)
+        return m.group(1) if m else None
+
+    # routes
+    def do_GET(self):
+        if self.path in ("/", "/index.html"):
+            return self._file(CTX["root"] / "tools" / "board" / "index.html", "text/html; charset=utf-8")
+        if self.path == "/api/tasks":
+            return self._json(200, tasklib.load_all(CTX["shared"]))
+        if self.path == "/api/state":
+            return self._json(200, api_state())
+        if self.path == "/events":
+            return self._sse()
+        tid = self._tid()
+        if tid:
+            try:
+                return self._json(200, tasklib.load(CTX["shared"], tid))
+            except OSError:
+                return self._err(404, f"{tid} not found")
+        self._err(404, "not found")
+
+    def do_POST(self):
+        try:
+            if self.path == "/api/tasks":
+                d = self._body()
+                if not str(d.get("title", "")).strip():
+                    return self._err(400, "title required")
+                t = tasklib.create(CTX["shared"], d["title"], team=str(d.get("team", "-")),
+                                   status=str(d.get("status", "backlog")), jira=str(d.get("jira", "")),
+                                   description=str(d.get("description", "")), criteria=str(d.get("criteria", "")),
+                                   by="human")
+                if t["status"] == "todo":
+                    self._wake(t)
+                return self._json(201, t)
+            tid = self._tid()
+            if tid and self.path.endswith("/comment"):
+                d = self._body()
+                text = str(d.get("text", "")).strip()
+                if not text:
+                    return self._err(400, "text required")
+                t = tasklib.append_log(CTX["shared"], tid, f"human: {text}")
+                if d.get("notify"):
+                    notify_gestion(f"COMMENT {tid} | new human note — see {self._rel(tid)} ## Log")
+                return self._json(200, t)
+            self._err(404, "not found")
+        except FileNotFoundError:
+            self._err(404, "ticket not found")
+        except (ValueError, json.JSONDecodeError) as e:
+            self._err(400, str(e))
+
+    def do_PATCH(self):
+        tid = self._tid()
+        if not tid:
+            return self._err(404, "not found")
+        try:
+            d = self._body()
+            prev = tasklib.load(CTX["shared"], tid)
+            allowed = {k: d[k] for k in ("title", "team", "status", "blocked", "jira", "description", "criteria") if k in d}
+            if not allowed:
+                return self._err(400, "nothing to change")
+            t = tasklib.update(CTX["shared"], tid, allowed)
+            if t["status"] != prev["status"]:
+                tasklib.append_log(CTX["shared"], tid, f"human: {prev['status']} → {t['status']} (board)")
+                t = tasklib.load(CTX["shared"], tid)
+                if t["status"] == "todo":
+                    self._wake(t)
+            return self._json(200, t)
+        except FileNotFoundError:
+            self._err(404, f"{tid} not found")
+        except (ValueError, json.JSONDecodeError) as e:
+            self._err(400, str(e))
+
+    def do_DELETE(self):
+        tid = self._tid()
+        if not tid:
+            return self._err(404, "not found")
+        tasklib.delete(CTX["shared"], tid)
+        self._json(200, {"deleted": tid})
+
+    # plumbing
+    def _rel(self, tid: str) -> str:
+        return f"{CTX['shared']}/tasks/{tid}.md"
+
+    def _wake(self, t: dict):
+        notify_gestion(f"NEW {t['id']} | {t['title']} — read {self._rel(t['id'])}, refine (team, criteria) and dispatch")
+
+    def _file(self, path: Path, ctype: str):
+        try:
+            raw = path.read_bytes()
+        except OSError:
+            return self._err(404, f"missing {path.name}")
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(raw)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(raw)
+
+    def _sse(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Connection", "keep-alive")
+        self.end_headers()
+        q = HUB.attach()
+        try:
+            self.wfile.write(b"retry: 1500\n\n")
+            self.wfile.flush()
+            while True:
+                try:
+                    event, data = q.get(timeout=15)
+                    self.wfile.write(f"event: {event}\ndata: {data}\n\n".encode())
+                except queue.Empty:
+                    self.wfile.write(b": ping\n\n")                 # heartbeat, detects dead clients
+                self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
+        finally:
+            HUB.detach(q)
+
+
+# ---------- lifecycle --------------------------------------------------------
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--root", type=Path, required=True, help="the teams/ directory (holds teams.json)")
+    ap.add_argument("--port", type=int, default=None, help="override board.port from teams.json (0 = OS-picked)")
+    a = ap.parse_args()
+    load_ctx(a.root.resolve())
+
+    port = a.port if a.port is not None else int(CTX["board"].get("port", 0) or 0)
+    class Server(ThreadingHTTPServer):
+        daemon_threads = True
+
+        def handle_error(self, request, client_address):        # client disconnects are normal, not tracebacks
+            import traceback
+            e = sys.exc_info()[1]
+            if not isinstance(e, (BrokenPipeError, ConnectionResetError, TimeoutError)):
+                traceback.print_exc()
+
+    srv = Server(("127.0.0.1", port), Handler)
+    CTX["url"] = f"http://127.0.0.1:{srv.server_address[1]}"
+
+    board_json = CTX["state"] / "board.json"
+    board_json.parent.mkdir(exist_ok=True)
+    board_json.write_text(json.dumps({"pid": os.getpid(), "port": srv.server_address[1],
+                                      "url": CTX["url"], "started": time.strftime("%Y-%m-%dT%H:%M:%S")}, indent=2))
+
+    def bye(*_):
+        try:
+            if board_json.exists() and json.loads(board_json.read_text()).get("pid") == os.getpid():
+                board_json.unlink()
+        except (OSError, json.JSONDecodeError):
+            pass
+        os._exit(0)
+    signal.signal(signal.SIGTERM, bye)
+    signal.signal(signal.SIGINT, bye)
+
+    threading.Thread(target=watcher, daemon=True).start()
+    print(f"teams-board on {CTX['url']} (root {CTX['root']})")
+    srv.serve_forever()
+
+
+if __name__ == "__main__":
+    main()

@@ -10,9 +10,14 @@
     "  `enabled: false` sur une team = ignorée par le lanceur (garde l'exemple sans le lancer).",
     "RUNNERS — quel binaire lance le lead: defaults.runner ou team.runner, clé de `runners` = { command, brain?, drop_flags?, healthcheck?, start? }.",
     "shell_prompt_regex — motif du prompt zsh attendu avant de taper la commande dans un nouveau workspace.",
-    "prices_per_mtok — optionnel: { \"<model>\": {\"in\",\"out\",\"cache_read\",\"cache_write\"} } en $/M tokens pour que `teams cost` affiche des dollars."
+    "prices_per_mtok — optionnel: { \"<model>\": {\"in\",\"out\",\"cache_read\",\"cache_write\"} } en $/M tokens pour que `teams cost` affiche des dollars.",
+    "board — kanban web lancé par `teams up`: { port (0 = port libre choisi par l'OS), jira_base_url (préfixe des liens Jira, ex https://xxx.atlassian.net/browse/) }."
   ],
   "shared_dir": "shared",
+  "board": {
+    "port": 0,
+    "jira_base_url": ""
+  },
   "permission_mode": "yolo",
   "defaults": {
     "model": "claude-fable-5",
