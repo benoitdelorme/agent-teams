@@ -12,7 +12,7 @@ Never use both for the same message.
 <TYPE> <ref> | <what>            ← header, mandatory, ≤ 100 chars
 <body>                           ← optional, ≤ 5 lines, only facts the recipient needs
 ```
-`<ref>` = task id from `shared/PLAN.md` (T3), or `-` if none.
+`<ref>` = ticket id from `SHARED_DIR/tasks/` (T3), or `-` if none. Batch refs comma-separated (`DONE T1,T2 | …`).
 
 Types (the only ones allowed):
 | TYPE      | sender → recipient           | when                                             | reply expected     |
@@ -31,7 +31,8 @@ Types (the only ones allowed):
 - Never send the same info to two teams "for information". Send only to who acts on it. gestion learns via DONE/BLOCKED, not CC.
 - One message per state change. Batch: if 3 tasks finish together, one DONE listing T1,T2,T3.
 - Do not reply to DONE, ANSWER, or STATUS answers.
-- Detail lives in files, not messages: plan/status in `shared/PLAN.md`, API shapes in `shared/CONTRACTS.md`. Update the file, then send the 1-line pointer.
+- Detail lives in files, not messages: tasks in `SHARED_DIR/tasks/T<n>.md`, API shapes in `shared/CONTRACTS.md`. Update the file, then send the 1-line pointer.
+- Messages whose header carries a `T<n>` ref are mirrored into that ticket's `## Log` (and TASK/DONE/BLOCKED update its status/flags) automatically by hooks. Never send a message whose only purpose is a status update.
 - Do not poll. Replies arrive as new turns in your session; end your turn and wait. STATUS at most once per task, only if a DONE/BLOCKED is overdue.
 - Language: messages in English (denser). Talk to the human in French.
 

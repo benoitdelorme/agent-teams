@@ -1,0 +1,493 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Board</title>
+<style>
+  :root{
+    --bg:#0e1013; --panel:#13161a; --card:#181c21; --card-hover:#1e232a;
+    --border:#252b33; --border-soft:#1d2229;
+    --text:#e7e9ec; --muted:#8b929c; --dim:#5a616c;
+    --accent:#5aa9ff; --red:#ff6161; --green:#3ecf8e; --amber:#f5b83d;
+    --violet:#a78bfa; --cyan:#4dd0e1; --pink:#f06292;
+    --r:10px; --r-sm:7px;
+    --font:"Inter","SF Pro Text",-apple-system,system-ui,"Segoe UI",Roboto,sans-serif;
+    --mono:"SF Mono","JetBrains Mono",ui-monospace,Menlo,monospace;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%}
+  body{background:var(--bg);color:var(--text);font:14px/1.45 var(--font);
+       -webkit-font-smoothing:antialiased;overflow:hidden}
+  button,input,textarea,select{font:inherit;color:inherit}
+  ::selection{background:rgba(90,169,255,.25)}
+
+  /* ---------- header ---------- */
+  header{display:flex;align-items:center;gap:14px;height:52px;padding:0 18px;
+         border-bottom:1px solid var(--border-soft);background:var(--panel)}
+  .brand{display:flex;align-items:baseline;gap:9px;white-space:nowrap}
+  .brand b{font-size:14.5px;font-weight:650;letter-spacing:.1px}
+  .brand span{color:var(--muted);font-size:13px;max-width:34vw;overflow:hidden;
+              text-overflow:ellipsis;white-space:nowrap}
+  #search{flex:0 1 260px;margin-left:auto;background:var(--card);border:1px solid var(--border);
+          border-radius:var(--r-sm);padding:5px 11px;font-size:13px;outline:none;color:var(--text)}
+  #search::placeholder{color:var(--dim)}
+  #search:focus{border-color:#33507a}
+  #teams{display:flex;gap:6px}
+  .pill{display:flex;align-items:center;gap:6px;padding:3.5px 10px;border:1px solid var(--border);
+        border-radius:99px;font-size:12px;color:var(--muted);background:var(--card)}
+  .pill i{width:7px;height:7px;border-radius:50%;background:var(--dim);flex:none}
+  .pill.working i{background:var(--green);box-shadow:0 0 6px rgba(62,207,142,.7)}
+  .pill.idle i{background:var(--amber)}
+  .pill.gone i{background:var(--red)}
+  #conn{width:8px;height:8px;border-radius:50%;background:var(--red);flex:none;transition:background .3s}
+  #conn.on{background:var(--green)}
+
+  /* ---------- board ---------- */
+  main{display:grid;grid-template-columns:repeat(5,minmax(232px,1fr));gap:12px;
+       height:calc(100% - 52px);padding:14px 16px 16px;overflow-x:auto}
+  .col{display:flex;flex-direction:column;min-width:0;border-radius:var(--r);
+       background:var(--panel);border:1px solid var(--border-soft);transition:border-color .12s, background .12s}
+  .col.drop{border-color:#3a577f;background:#151a21}
+  .col-head{display:flex;align-items:center;gap:8px;padding:11px 13px 9px}
+  .col-head h2{font-size:12px;font-weight:650;letter-spacing:.7px;text-transform:uppercase;color:var(--muted)}
+  .col-head .n{font-size:11.5px;color:var(--dim);background:var(--card);border:1px solid var(--border);
+               border-radius:99px;padding:1px 7px;font-family:var(--mono)}
+  .col-head .add{margin-left:auto;width:22px;height:22px;border:1px solid var(--border);background:var(--card);
+                 border-radius:6px;color:var(--muted);cursor:pointer;font-size:14px;line-height:1}
+  .col-head .add:hover{color:var(--text);border-color:#3a4250}
+  .col-list{flex:1;overflow-y:auto;padding:2px 9px 12px;display:flex;flex-direction:column;gap:8px;scrollbar-width:thin;scrollbar-color:#2c333d transparent}
+  .col-list::-webkit-scrollbar{width:8px}
+  .col-list::-webkit-scrollbar-thumb{background:#2c333d;border-radius:4px}
+  .empty{border:1.5px dashed var(--border);border-radius:var(--r-sm);color:var(--dim);
+         font-size:12.5px;text-align:center;padding:18px 8px}
+
+  .card{background:var(--card);border:1px solid var(--border);border-radius:var(--r-sm);
+        padding:9px 11px 8px;cursor:grab;user-select:none;-webkit-user-select:none;
+        transition:background .1s,border-color .1s;position:relative}
+  .card:hover{background:var(--card-hover);border-color:#323a45}
+  .card.blocked{border-left:3px solid var(--red);padding-left:9px}
+  .card.dragging{opacity:.3}
+  .card.hidden{display:none}
+  .chips{display:flex;align-items:center;gap:6px;margin-bottom:5px;flex-wrap:wrap}
+  .chip{font:11px/1 var(--mono);color:var(--muted);background:#12161b;border:1px solid var(--border);
+        border-radius:5px;padding:3px 6px}
+  .chip.jira{color:#7db3ff}
+  a.chip.jira:hover{border-color:#33507a;text-decoration:none}
+  .badge{font-size:10.5px;font-weight:600;letter-spacing:.4px;text-transform:uppercase;
+         border-radius:5px;padding:3px 7px}
+  .card h3{font-size:13.5px;font-weight:530;line-height:1.35;word-wrap:break-word}
+  .card .foot{display:flex;align-items:center;gap:8px;margin-top:7px;font-size:11.5px;color:var(--dim)}
+  .card .foot .bl{color:var(--red);font-weight:600}
+  #ghost{position:fixed;z-index:99;pointer-events:none;width:230px;transform:rotate(2.5deg);
+         box-shadow:0 12px 32px rgba(0,0,0,.55);opacity:.95}
+
+  .newform{display:flex}
+  .newform input{flex:1;background:var(--card);border:1px solid #33507a;border-radius:var(--r-sm);
+                 padding:8px 11px;font-size:13px;outline:none}
+
+  /* ---------- modal ---------- */
+  #backdrop[hidden]{display:none}
+  #backdrop{position:fixed;inset:0;background:rgba(5,7,9,.66);backdrop-filter:blur(2px);
+            display:flex;align-items:flex-start;justify-content:center;padding:5vh 16px;z-index:50;overflow-y:auto}
+  #modal{width:min(860px,100%);background:var(--panel);border:1px solid var(--border);
+         border-radius:14px;box-shadow:0 24px 70px rgba(0,0,0,.6);padding:22px 24px 20px}
+  .m-top{display:flex;align-items:center;gap:10px;margin-bottom:14px}
+  .m-top .chip{font-size:12px;padding:4px 8px}
+  .m-top .close{margin-left:auto;border:none;background:none;color:var(--dim);font-size:20px;cursor:pointer}
+  .m-top .close:hover{color:var(--text)}
+  #m-title{width:100%;background:none;border:1px solid transparent;border-radius:var(--r-sm);
+           font-size:19px;font-weight:640;padding:6px 8px;margin:-6px 0 14px -8px;outline:none}
+  #m-title:hover{border-color:var(--border)} #m-title:focus{border-color:#33507a;background:var(--card)}
+  .m-grid{display:grid;grid-template-columns:1fr 218px;gap:22px}
+  @media (max-width:720px){.m-grid{grid-template-columns:1fr}}
+  .f label{display:block;font-size:11px;font-weight:650;letter-spacing:.6px;text-transform:uppercase;
+           color:var(--dim);margin:0 0 5px}
+  .f{margin-bottom:15px}
+  textarea{width:100%;background:var(--card);border:1px solid var(--border);border-radius:var(--r-sm);
+           padding:9px 11px;font-size:13px;line-height:1.5;resize:vertical;min-height:64px;outline:none;
+           font-family:var(--font)}
+  textarea:focus{border-color:#33507a}
+  select,.side input[type=text]{width:100%;background:var(--card);border:1px solid var(--border);
+        border-radius:var(--r-sm);padding:7px 9px;font-size:13px;outline:none;appearance:none}
+  select:focus,.side input:focus{border-color:#33507a}
+  select{background-image:url('data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" width="10" height="6"><path d="M1 1l4 4 4-4" stroke="%238b929c" fill="none" stroke-width="1.5"/></svg>');
+         background-repeat:no-repeat;background-position:right 10px center;padding-right:26px;cursor:pointer}
+  .side .meta{font-size:12px;color:var(--dim);line-height:1.8;font-family:var(--mono)}
+  .switch{display:flex;align-items:center;gap:9px;cursor:pointer;font-size:13px;color:var(--muted)}
+  .switch input{accent-color:var(--red);width:15px;height:15px}
+  .danger{border:1px solid transparent;background:none;color:var(--dim);font-size:12px;cursor:pointer;
+          padding:5px 8px;border-radius:var(--r-sm);margin-top:6px}
+  .danger:hover{color:var(--red);border-color:rgba(255,97,97,.35)}
+
+  #m-log{background:#0f1216;border:1px solid var(--border-soft);border-radius:var(--r-sm);
+         padding:6px 0;max-height:300px;overflow-y:auto}
+  #m-log:empty{display:none}
+  .log-line{display:flex;gap:10px;padding:4px 12px;font-size:12.5px}
+  .log-line:hover{background:#13171d}
+  .log-line time{color:var(--dim);font-family:var(--mono);font-size:11.5px;padding-top:1px;flex:none}
+  .log-line .t-DONE{color:var(--green);font-weight:600}
+  .log-line .t-BLOCKED{color:var(--red);font-weight:600}
+  .log-line .t-TASK{color:var(--accent);font-weight:600}
+  .log-line .t-human{color:var(--amber);font-weight:600}
+  .comment{display:flex;gap:8px;margin-top:10px;align-items:center}
+  .comment input[type=text]{flex:1;background:var(--card);border:1px solid var(--border);
+        border-radius:var(--r-sm);padding:8px 11px;font-size:13px;outline:none}
+  .comment input[type=text]:focus{border-color:#33507a}
+  .comment label{display:flex;align-items:center;gap:5px;font-size:12px;color:var(--dim);white-space:nowrap;cursor:pointer}
+  .comment button{background:#1c2b40;border:1px solid #33507a;color:#cfe3ff;border-radius:var(--r-sm);
+                  padding:8px 14px;font-size:13px;cursor:pointer}
+  .comment button:hover{background:#22344e}
+
+  /* ---------- toasts ---------- */
+  #toasts{position:fixed;bottom:18px;right:18px;display:flex;flex-direction:column;gap:8px;z-index:99}
+  .toast{background:#1a1010;border:1px solid rgba(255,97,97,.4);color:#ffb3b3;border-radius:var(--r-sm);
+         padding:9px 14px;font-size:13px;box-shadow:0 8px 24px rgba(0,0,0,.5);animation:in .18s ease-out}
+  .toast.ok{background:#0f1a15;border-color:rgba(62,207,142,.35);color:#a9e8cd}
+  @keyframes in{from{transform:translateY(8px);opacity:0}}
+</style>
+</head>
+<body>
+<header>
+  <div class="brand"><b>Board</b><span id="plan"></span></div>
+  <input id="search" type="text" placeholder="Filtrer  (T3, jira, texte…)" spellcheck="false">
+  <div id="teams"></div>
+  <div id="conn" title="live"></div>
+</header>
+<main id="board"></main>
+<div id="backdrop" hidden><div id="modal"></div></div>
+<div id="toasts"></div>
+
+<script>
+"use strict";
+const COLS = [["backlog","Backlog"],["todo","TODO"],["doing","En cours"],["qa","Ready for QA"],["done","Done"]];
+const TEAM_COLORS = {gestion:"var(--amber)", frontend:"var(--cyan)", backend:"var(--violet)", design:"var(--pink)"};
+const HUES = ["#4dd0e1","#a78bfa","#f5b83d","#f06292","#81c784","#ffb74d","#64b5f6"];
+const $ = s => document.querySelector(s);
+
+let TASKS = new Map();          // id -> task
+let META  = {teams: [], jira_base_url: "", plan_title: ""};
+let open_id = null;             // ticket in the modal
+let drag = null;                // {id, ghost, fromCol}
+let renderQueued = false;
+
+/* ---------- utils ---------- */
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+function teamColor(name){
+  if (TEAM_COLORS[name]) return TEAM_COLORS[name];
+  let h = 0; for (const c of name) h = (h*31 + c.charCodeAt(0)) >>> 0;
+  return HUES[h % HUES.length];
+}
+function rel(iso){
+  if (!iso) return "";
+  const d = new Date(iso), s = (Date.now() - d) / 1000;
+  if (isNaN(s)) return iso;
+  if (s < 50) return "à l'instant";
+  if (s < 3600) return `il y a ${Math.round(s/60)} min`;
+  if (s < 86400 && d.getDate() === new Date().getDate())
+    return d.toLocaleTimeString("fr-FR", {hour:"2-digit", minute:"2-digit"});
+  return d.toLocaleDateString("fr-FR", {day:"numeric", month:"short"}) + " " +
+         d.toLocaleTimeString("fr-FR", {hour:"2-digit", minute:"2-digit"});
+}
+function toast(msg, ok=false){
+  const el = document.createElement("div");
+  el.className = "toast" + (ok ? " ok" : "");
+  el.textContent = msg;
+  $("#toasts").appendChild(el);
+  setTimeout(() => el.remove(), 4200);
+}
+async function api(method, path, body){
+  const r = await fetch(path, {method, headers: body ? {"Content-Type":"application/json"} : {},
+                               body: body ? JSON.stringify(body) : undefined});
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(d.error || `${method} ${path}: ${r.status}`);
+  return d;
+}
+
+/* ---------- board rendering ---------- */
+function requestRender(){
+  if (renderQueued) return;
+  renderQueued = true;
+  requestAnimationFrame(() => { renderQueued = false; if (!drag) render(); });
+}
+function sorted(status){
+  const ts = [...TASKS.values()].filter(t => t.status === status);
+  if (status === "backlog" || status === "todo")
+    return ts.sort((a,b) => num(a.id) - num(b.id));
+  return ts.sort((a,b) => (b.updated || "").localeCompare(a.updated || ""));
+}
+const num = id => parseInt(id.slice(1)) || 0;
+
+function render(){
+  const q = $("#search").value.trim().toLowerCase();
+  const board = $("#board");
+  board.innerHTML = COLS.map(([st, label]) => {
+    const ts = sorted(st).filter(t => !q || matches(t, q));
+    return `<section class="col" data-status="${st}">
+      <div class="col-head"><h2>${label}</h2><span class="n">${ts.length}</span>
+        ${st === "backlog" ? '<button class="add" title="Nouveau ticket">+</button>' : ""}</div>
+      <div class="col-list">${ts.map(cardHTML).join("") || `<div class="empty">—</div>`}</div>
+    </section>`;
+  }).join("");
+  board.querySelectorAll(".card").forEach(el => {
+    el.addEventListener("pointerdown", onPointerDown);
+    el.addEventListener("click", () => { if (!el.dataset.moved) openModal(el.dataset.id); });
+  });
+  const add = board.querySelector(".add");
+  if (add) add.addEventListener("click", showNewForm);
+}
+function matches(t, q){
+  return (t.id + " " + t.title + " " + t.jira + " " + t.team).toLowerCase().includes(q);
+}
+function cardHTML(t){
+  const jira = t.jira
+    ? (META.jira_base_url
+        ? `<a class="chip jira" href="${esc(META.jira_base_url + t.jira)}" target="_blank" rel="noopener">${esc(t.jira)}</a>`
+        : `<span class="chip jira">${esc(t.jira)}</span>`)
+    : "";
+  const team = t.team && t.team !== "-"
+    ? `<span class="badge" style="color:${teamColor(t.team)};background:color-mix(in srgb,${teamColor(t.team)} 13%,transparent)">${esc(t.team)}</span>` : "";
+  return `<article class="card${t.blocked ? " blocked" : ""}" data-id="${t.id}">
+    <div class="chips"><span class="chip">${t.id}</span>${jira}${team}</div>
+    <h3>${esc(t.title)}</h3>
+    <div class="foot">${t.blocked ? '<span class="bl">bloqué</span>' : ""}<span>${rel(t.updated)}</span></div>
+  </article>`;
+}
+function showNewForm(){
+  const list = $('.col[data-status="backlog"] .col-list');
+  if (list.querySelector(".newform")) return list.querySelector(".newform input").focus();
+  const f = document.createElement("div");
+  f.className = "newform";
+  f.innerHTML = `<input type="text" placeholder="Titre du ticket… (Entrée)" spellcheck="false">`;
+  list.prepend(f);
+  const inp = f.querySelector("input");
+  inp.focus();
+  inp.addEventListener("keydown", async e => {
+    if (e.key === "Escape") return f.remove();
+    if (e.key !== "Enter" || !inp.value.trim()) return;
+    inp.disabled = true;
+    try {
+      const t = await api("POST", "/api/tasks", {title: inp.value.trim()});
+      TASKS.set(t.id, t); render();
+      toast(`${t.id} créé`, true);
+    } catch (err) { toast(err.message); f.remove(); }
+  });
+  inp.addEventListener("blur", () => { if (!inp.value.trim()) f.remove(); });
+}
+
+/* ---------- drag & drop ---------- */
+function onPointerDown(e){
+  if (e.button !== 0) return;
+  const card = e.currentTarget;
+  delete card.dataset.moved;
+  const sx = e.clientX, sy = e.clientY;
+  const move = ev => {
+    if (!drag && Math.hypot(ev.clientX - sx, ev.clientY - sy) > 5) startDrag(card, ev);
+    if (drag) dragMove(ev);
+  };
+  const up = ev => {
+    window.removeEventListener("pointermove", move);
+    window.removeEventListener("pointerup", up);
+    if (drag) endDrag(ev);
+  };
+  window.addEventListener("pointermove", move);
+  window.addEventListener("pointerup", up);
+}
+function startDrag(card, ev){
+  const ghost = card.cloneNode(true);
+  ghost.id = "ghost";
+  ghost.style.width = card.offsetWidth + "px";
+  document.body.appendChild(ghost);
+  card.classList.add("dragging");
+  card.dataset.moved = "1";
+  drag = {id: card.dataset.id, ghost, card};
+  dragMove(ev);
+}
+function dragMove(ev){
+  drag.ghost.style.left = ev.clientX - 20 + "px";
+  drag.ghost.style.top  = ev.clientY - 14 + "px";
+  const col = document.elementFromPoint(ev.clientX, ev.clientY)?.closest(".col");
+  document.querySelectorAll(".col").forEach(c => c.classList.toggle("drop", c === col));
+  drag.over = col?.dataset.status || null;
+}
+async function endDrag(){
+  const {id, ghost, card, over} = drag;
+  drag = null;
+  ghost.remove();
+  card.classList.remove("dragging");
+  document.querySelectorAll(".col").forEach(c => c.classList.remove("drop"));
+  const t = TASKS.get(id);
+  if (!over || !t || t.status === over) { render(); return; }
+  const prev = t.status;
+  t.status = over; render();                        // optimiste
+  try {
+    const fresh = await api("PATCH", `/api/tasks/${id}`, {status: over});
+    TASKS.set(id, fresh); requestRender();
+    if (over === "todo") toast(`${id} → TODO, gestion notifiée`, true);
+  } catch (err) {
+    t.status = prev; render();
+    toast(`${id}: ${err.message}`);
+  }
+}
+
+/* ---------- modal ---------- */
+function openModal(id){
+  open_id = id;
+  renderModal(true);
+  $("#backdrop").hidden = false;
+}
+function closeModal(){
+  $("#backdrop").hidden = true;
+  open_id = null;
+}
+function renderModal(full){
+  const t = TASKS.get(open_id);
+  if (!t) return closeModal();
+  const M = $("#modal");
+  if (full){
+    M.innerHTML = `
+      <div class="m-top">
+        <span class="chip">${t.id}</span>
+        <span class="badge" id="m-teambadge"></span>
+        <button class="close" title="Fermer (Esc)">×</button>
+      </div>
+      <input id="m-title" spellcheck="false">
+      <div class="m-grid">
+        <div>
+          <div class="f"><label>Description</label><textarea id="m-desc" rows="4" placeholder="Contexte, but…"></textarea></div>
+          <div class="f"><label>Criteria</label><textarea id="m-crit" rows="3" placeholder="- build green&#10;- …"></textarea></div>
+          <div class="f"><label>Log</label><div id="m-log"></div>
+            <div class="comment">
+              <input type="text" id="m-comment" placeholder="Note pour le ticket…" spellcheck="false">
+              <label><input type="checkbox" id="m-notify"> notifier gestion</label>
+              <button id="m-send">Ajouter</button>
+            </div></div>
+        </div>
+        <div class="side">
+          <div class="f"><label>Statut</label><select id="m-status">${COLS.map(([s,l]) => `<option value="${s}">${l}</option>`).join("")}</select></div>
+          <div class="f"><label>Team</label><select id="m-team"><option value="-">—</option>${META.teams.filter(x => !x.primary).map(x => `<option>${esc(x.name)}</option>`).join("")}</select></div>
+          <div class="f"><label>Jira</label><input type="text" id="m-jira" placeholder="LUM-482" spellcheck="false"></div>
+          <div class="f"><label class="switch" style="text-transform:none;letter-spacing:0"><input type="checkbox" id="m-blocked"> <span>Bloqué</span></label></div>
+          <div class="f meta" id="m-meta"></div>
+          <button class="danger" id="m-del">Supprimer le ticket</button>
+        </div>
+      </div>`;
+    M.querySelector(".close").onclick = closeModal;
+    bindField("#m-title", "title", v => v.trim() || null);
+    bindField("#m-desc", "description");
+    bindField("#m-crit", "criteria");
+    bindField("#m-jira", "jira", v => v.trim());
+    $("#m-status").onchange = e => patch({status: e.target.value});
+    $("#m-team").onchange = e => patch({team: e.target.value});
+    $("#m-blocked").onchange = e => patch({blocked: e.target.checked});
+    $("#m-send").onclick = sendComment;
+    $("#m-comment").addEventListener("keydown", e => { if (e.key === "Enter") sendComment(); });
+    $("#m-del").onclick = async () => {
+      if (!confirm(`Supprimer ${t.id} ?`)) return;
+      try { await api("DELETE", `/api/tasks/${t.id}`); TASKS.delete(t.id); closeModal(); render(); }
+      catch (err) { toast(err.message); }
+    };
+  }
+  // values — never clobber the field being edited
+  setVal("#m-title", t.title); setVal("#m-desc", t.description); setVal("#m-crit", t.criteria);
+  setVal("#m-status", t.status); setVal("#m-team", t.team); setVal("#m-jira", t.jira);
+  const bl = $("#m-blocked"); if (document.activeElement !== bl) bl.checked = t.blocked;
+  const badge = $("#m-teambadge");
+  if (t.team && t.team !== "-"){
+    badge.style.display = ""; badge.textContent = t.team;
+    badge.style.color = teamColor(t.team);
+    badge.style.background = `color-mix(in srgb,${teamColor(t.team)} 13%,transparent)`;
+  } else badge.style.display = "none";
+  $("#m-meta").innerHTML = `créé ${esc(rel(t.created))} · maj ${esc(rel(t.updated))} · par ${esc(t.by || "?")}`
+    + `<br>shared/tasks/${t.id}.md`;
+  const log = $("#m-log"), atEnd = log.scrollTop + log.clientHeight >= log.scrollHeight - 8;
+  log.innerHTML = t.log.map(logHTML).join("");
+  if (atEnd || full) log.scrollTop = log.scrollHeight;
+}
+function setVal(sel, v){
+  const el = $(sel);
+  if (el && document.activeElement !== el && el.value !== String(v ?? "")) el.value = v ?? "";
+}
+function logHTML(line){
+  const m = line.match(/^(\d\d:\d\d:\d\d)\s+(.*)$/);
+  const time = m ? m[1] : "", rest = m ? m[2] : line;
+  const marked = esc(rest)
+    .replace(/\b(TASK|DONE|BLOCKED|ASK|ANSWER|CONTRACT|NEW|COMMENT)\b/, w => `<span class="t-${w === "DONE" ? "DONE" : w === "BLOCKED" ? "BLOCKED" : "TASK"}">${w}</span>`)
+    .replace(/^human:/, `<span class="t-human">human:</span>`);
+  return `<div class="log-line"><time>${time}</time><span>${marked}</span></div>`;
+}
+function bindField(sel, key, clean){
+  const el = $(sel);
+  el.addEventListener("blur", () => {
+    const t = TASKS.get(open_id);
+    if (!t) return;
+    let v = clean ? clean(el.value) : el.value;
+    if (v === null) { el.value = t[key]; return; }
+    if (v !== (t[key] ?? "")) patch({[key]: v});
+  });
+  if (el.tagName === "INPUT")
+    el.addEventListener("keydown", e => { if (e.key === "Enter") el.blur(); });
+}
+async function patch(changes){
+  const id = open_id;
+  try {
+    const t = await api("PATCH", `/api/tasks/${id}`, changes);
+    TASKS.set(id, t);
+    if (open_id === id) renderModal(false);
+    requestRender();
+  } catch (err) { toast(err.message); }
+}
+async function sendComment(){
+  const inp = $("#m-comment"), text = inp.value.trim();
+  if (!text) return;
+  inp.disabled = true;
+  try {
+    const t = await api("POST", `/api/tasks/${open_id}/comment`, {text, notify: $("#m-notify").checked});
+    TASKS.set(open_id, t); inp.value = ""; renderModal(false); requestRender();
+  } catch (err) { toast(err.message); }
+  inp.disabled = false; inp.focus();
+}
+$("#backdrop").addEventListener("mousedown", e => { if (e.target === e.currentTarget) closeModal(); });
+window.addEventListener("keydown", e => { if (e.key === "Escape" && open_id) closeModal(); });
+
+/* ---------- header / state ---------- */
+function renderHeader(){
+  $("#plan").textContent = META.plan_title || "";
+  document.title = (META.plan_title ? META.plan_title + " — " : "") + "Board";
+  $("#teams").innerHTML = META.teams.map(t =>
+    `<div class="pill ${esc(t.status)}" title="${esc(t.purpose)} — ${esc(t.status)}${t.updated ? " (" + esc(rel(t.updated)) + ")" : ""}">
+       <i></i>${esc(t.title || t.name)}</div>`).join("");
+}
+
+/* ---------- live ---------- */
+async function resync(){
+  const [tasks, state] = await Promise.all([api("GET", "/api/tasks"), api("GET", "/api/state")]);
+  TASKS = new Map(tasks.map(t => [t.id, t]));
+  META = state;
+  renderHeader(); render();
+  if (open_id) TASKS.has(open_id) ? renderModal(false) : closeModal();
+}
+function connect(){
+  const es = new EventSource("/events");
+  es.onopen = () => { $("#conn").classList.add("on"); resync().catch(() => {}); };
+  es.onerror = () => $("#conn").classList.remove("on");
+  es.addEventListener("task", e => {
+    const t = JSON.parse(e.data);
+    TASKS.set(t.id, t);
+    requestRender();
+    if (open_id === t.id) renderModal(false);
+  });
+  es.addEventListener("task-deleted", e => {
+    const {id} = JSON.parse(e.data);
+    TASKS.delete(id);
+    requestRender();
+    if (open_id === id) closeModal();
+  });
+  es.addEventListener("state", e => { META = JSON.parse(e.data); renderHeader(); });
+}
+$("#search").addEventListener("input", () => render());
+setInterval(() => { if (!drag) requestRender(); }, 30_000);   // relative times
+resync().then(connect).catch(err => { toast("Serveur injoignable : " + err.message); connect(); });
+</script>
+</body>
+</html>

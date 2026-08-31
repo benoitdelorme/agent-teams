@@ -3,3 +3,9 @@ __pycache__/
 rules/*.local.md
 shared/.roster.json
 shared/LOG.md
+shared/tasks/*
+!shared/tasks/.gitkeep
+rules/*.md
+!rules/.gitkeep
+shared/PLAN.md
+shared/CONTRACTS.md
