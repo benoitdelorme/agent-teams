@@ -35,7 +35,7 @@
   "teams": [
     {
       "name": "gestion",
-      "title": "Michel",
+      "title": "xxx - Manager",
       "primary": true,
       "cwd": "..",
       "prompt": "gestion.md",
@@ -47,14 +47,14 @@
     },
     {
       "name": "backend",
-      "title": "Backend",
+      "title": "xxx - Backend",
       "cwd": "../sample-backend",
       "prompt": "backend.md",
       "purpose": "Server side: API, data, business logic (sample-backend)."
     },
     {
       "name": "frontend",
-      "title": "Frontend",
+      "title": "xxx - Frontend",
       "cwd": "../sample-frontend",
       "prompt": "frontend.md",
       "purpose": "Client side: UI, pages, API consumption (sample-frontend)."
