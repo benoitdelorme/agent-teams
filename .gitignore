@@ -3,3 +3,7 @@ __pycache__/
 rules/*.local.md
 shared/.roster.json
 shared/LOG.md
+shared/design/.meta/
+shared/design/assets/*
+!shared/design/assets/.gitkeep
+tools/qa/node_modules/
