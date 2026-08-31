@@ -6,6 +6,8 @@
   teams up --only <team>                start ONE team (new/dead) in its own tab, leaving the live ones untouched (Warp only)
   teams status                          liveness per team, PLAN.md task summary, tail of shared/LOG.md
   teams cost                            token usage per team (lead vs workers, per model); $ if prices_per_mtok is set
+  teams gc [--loop] [--dry-run]         token-free housekeeping (auto-started by `up`, every gc.interval_sec): stale session
+                                        registry, orphan ~/.claude/teams|tasks dirs, orphan lead processes, silent workers → nudge lead
   teams learn [team|all] [--force]      MANUAL: scan a team's repo once, one cheap LLM call → rules/<team>.md digest (cached by fingerprint)
                                         a team with "learn": false in teams.json is skipped by `all` and by the staleness check (docs-only team)
   teams init <repo>... [--out f]        MANUAL: scan one or more repos, propose a teams.json (one team per detected app; gestion in their common parent)
@@ -14,10 +16,13 @@
   teams add <name> --cwd <dir> [--purpose "..."]   register a new team + prompt stub
   teams cmd <team>                      print the exact `claude` command for a team
 
-Config: teams.json next to ../ (see --config). Prompts in prompts/, workers in agents/.
+Config: teams.json next to ../ (see --config). Prompts in prompts/, workers in agents/, on-demand tooling in tools/.
 Terminal: programa when run inside it, else Warp (TERM_PROGRAM=WarpTerminal); force with "terminal" in teams.json.
+Per-team: disallowed_tools [..] (+ defaults.disallowed_tools; e.g. deny the claude.ai Figma connector everywhere but design),
+plugins [..] (enabled only for that team via --settings), learn: false (no repo digest).
+Worker frontmatter `tools: A, B` restricts that worker's tools — but removes ToolSearch, so deferred MCP tools vanish: omit for MCP users.
 """
-import argparse, json, os, re, shlex, subprocess, sys, time
+import argparse, json, os, re, shlex, shutil, signal, subprocess, sys, time
 from datetime import datetime
 from pathlib import Path
 
@@ -29,6 +34,8 @@ SELF = Path(__file__).resolve()
 RULES = HERE / "rules"
 WARP_TABS = Path.home() / ".warp" / "tab_configs"   # Warp reads one .toml per tab config from here
 WARP_COLOR = "blue"                                 # same colour on every team tab (Warp cannot group tabs from a file)
+CLAUDE_HOME = Path.home() / ".claude"
+GC_DEFAULTS = {"interval_sec": 300, "worker_idle_min": 10, "nudge_every_min": 30, "orphan_age_min": 10}
 
 SCAN_FILES = ["CLAUDE.md", ".claude/CLAUDE.md", "AGENTS.md", "README.md", "readme.md", "CONTRIBUTING.md",
               "package.json", "pyproject.toml", "composer.json", "go.mod", "Cargo.toml", "Gemfile", "requirements.txt",
@@ -56,6 +63,7 @@ def load(cfg_path: Path) -> dict:
     cfg = json.loads(cfg_path.read_text())
     cfg["_root"] = cfg_path.parent
     cfg["_path"] = cfg_path.resolve()
+    cfg["gc"] = {**GC_DEFAULTS, **cfg.get("gc", {})}
     cfg["shared_abs"] = (cfg["_root"] / cfg.get("shared_dir", "shared")).resolve()
     cfg["teams"] = [t for t in cfg["teams"] if t.get("enabled", True)]
     runners = cfg.setdefault("runners", {"claude": {"command": "claude"}})
@@ -117,6 +125,8 @@ def parse_agent_md(path: Path) -> tuple[str, dict]:
     for line in m.group(1).splitlines():
         k, _, v = line.partition(":")
         meta[k.strip()] = v.strip()
+    if isinstance(meta.get("tools"), str):                      # frontmatter `tools: A, B` -> list for --agents
+        meta["tools"] = [x.strip() for x in meta["tools"].split(",") if x.strip()]
     return meta.pop("name", path.stem), {**meta, "prompt": m.group(2).strip()}
 
 
@@ -228,6 +238,9 @@ def claude_argv(cfg: dict, team: dict, surfaces: dict, inline_agents: bool = Tru
     for d in [*cfg["defaults"].get("add_dirs", []), *team.get("add_dirs", [])]:
         cmd += ["--add-dir", str((cfg["_root"] / d).resolve())]
     cmd += ["--settings", hook_settings_json(cfg, team)]
+    denied = ([] if team.get("disallowed_tools_replace") else list(cfg["defaults"].get("disallowed_tools", []))) + list(team.get("disallowed_tools", []))
+    if denied:
+        cmd += ["--disallowedTools", ",".join(denied)]
     pm = team.get("permission_mode", cfg.get("permission_mode"))
     if pm == "yolo":
         cmd.append("--dangerously-skip-permissions")
@@ -252,10 +265,14 @@ def hook_settings_json(cfg: dict, team: dict) -> str:
     hook = (f"TEAMS_TEAM={shlex.quote(team['name'])} TEAMS_ROOT={shlex.quote(str(HERE))} "
             f"TEAMS_PREFIX={shlex.quote(session_prefix(cfg))} python3 {shlex.quote(str(SELF))} _hook")
     ev = lambda: [{"matcher": "", "hooks": [{"type": "command", "command": hook, "timeout": 5}]}]
-    return json.dumps({"hooks": {
+    settings = {"hooks": {
         "SessionStart": ev(), "UserPromptSubmit": ev(), "Stop": ev(), "SessionEnd": ev(),
+        "SubagentStart": ev(), "SubagentStop": ev(),
         "PreToolUse": [{"matcher": "SendMessage", "hooks": [{"type": "command", "command": hook, "timeout": 5}]}],
-    }})
+    }}
+    if team.get("plugins"):                                     # plugins disabled at user scope, enabled for this team only
+        settings["enabledPlugins"] = {p: True for p in team["plugins"]}
+    return json.dumps(settings)
 
 
 def cmd_hook():
@@ -278,6 +295,17 @@ def cmd_hook():
     st.setdefault("sessions", [])
     if d.get("session_id") and d["session_id"] not in st["sessions"]:
         st["sessions"].append(d["session_id"])
+    if ev == "SessionStart":
+        st["workers"] = {}                                   # agent ids are per session
+    if ev in ("SubagentStart", "SubagentStop") and d.get("agent_id"):
+        now = time.time()
+        w = st.setdefault("workers", {}).setdefault(d["agent_id"], {"type": d.get("agent_type", "?"), "started": now})
+        if d.get("agent_name"):
+            w["name"] = d["agent_name"]
+        if ev == "SubagentStop":
+            w["stopped"] = now
+        if len(st["workers"]) > 100:                         # keep the 100 most recent
+            st["workers"] = dict(sorted(st["workers"].items(), key=lambda kv: kv[1]["started"])[-100:])
     if ev == "SessionEnd":
         st.pop("session_id", None)
     f.write_text(json.dumps(st, indent=2))
@@ -415,6 +443,7 @@ def cmd_learn(cfg: dict, a):
                else [t for t in cfg["teams"] if t["name"] == a.team])
     if not targets:
         die(f"unknown team {a.team}")
+    targets = [t for t in targets if t.get("learn", True)] or die(f"team {a.team} has learn: false (no repo to digest)")
     RULES.mkdir(exist_ok=True)
     for t in targets:
         root = t["cwd_abs"]
@@ -620,9 +649,11 @@ def warp_up(cfg: dict, ordered: list, primary: dict):
     for t in ordered:                                     # primary last -> it is the focused tab
         warp_open_tab(stems[t["name"]])
         print(f"[{t['name']}] warp tab {t.get('title', t['name'])!r} ({t['cwd_abs']})")
+    gc_start(cfg)                                         # under Warp: ~/.claude sweeps only (no lead kill, no nudge)
     print(f"\n{primary['name']} is the last tab opened, so it has the focus - talk to it there."
           f"\nWarp cannot group tabs from a config: the {len(ordered)} tabs share the colour {WARP_COLOR}; "
-          f"select them and right-click > New group with tabs to group them.\n`teams down` stops the sessions.")
+          f"select them and right-click > New group with tabs to group them.\n`teams down` stops the sessions."
+          f"\ngc every {cfg['gc']['interval_sec']}s → .state/gc.log (~/.claude sweeps only in Warp).")
 
 
 def warp_up_only(cfg: dict, name: str):
@@ -648,12 +679,12 @@ def warp_up_only(cfg: dict, name: str):
     with open(cfg["shared_abs"] / "LOG.md", "a") as fh:
         fh.write(f"\n## up --only {name} {datetime.now():%Y-%m-%d %H:%M}\n")
     warp_open_tab(stem)
+    gc_start(cfg)                                         # no-op if the loop from `up` is still alive
     print(f"[{name}] warp tab {t.get('title', name)!r} ({t['cwd_abs']}) — the other {len(cfg['teams']) - 1} team(s) left running; "
           f"their prompt files were regenerated with the {len(cfg['teams'])}-team roster (picked up on their next start/--resume).")
 
 
 def warp_resume(cfg: dict, ordered: list, primary: dict):
-    import signal
     st = load_state()
     if not st:
         die("nothing to resume (no state) — run `teams up`")
@@ -684,11 +715,11 @@ def warp_resume(cfg: dict, ordered: list, primary: dict):
         print(f"[{t['name']}] restarted with --continue")
     with open(cfg["shared_abs"] / "LOG.md", "a") as fh:
         fh.write(f"\n## resume {datetime.now():%Y-%m-%d %H:%M}\n")
+    gc_start(cfg)                                         # no-op if the loop from `up` is still alive
     print(f"\n{len(dead)} tab(s) reopened in the ACTIVE Warp window.")
 
 
 def warp_down(cfg: dict, st: dict):
-    import signal
     pending = []
     shells, left = {}, []
     for name in st.get("workspaces", {}):
@@ -747,6 +778,193 @@ def cmd_run(cfg: dict, a):
     with open(cfg["shared_abs"] / "LOG.md", "a") as fh:
         fh.write(f"## run {a.team} {datetime.now():%Y-%m-%d %H:%M}\n")
     os.execvp(argv[0], argv)
+
+
+# ---------- gc: token-free housekeeping --------------------------------------
+def pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0); return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
+def registry() -> list[tuple[Path, dict]]:
+    """~/.claude/sessions/<pid>.json — one entry per claude session on this machine (what ListAgents shows as peers)."""
+    out = []
+    for f in (CLAUDE_HOME / "sessions").glob("*.json"):
+        try:
+            out.append((f, json.loads(f.read_text())))
+        except (OSError, json.JSONDecodeError):
+            continue
+    return out
+
+
+def gc_stale_registry(dry: bool) -> list[str]:
+    """Registry entries whose pid is gone (SIGKILL, crash, closed pane) — they pollute every session's ListAgents."""
+    done = []
+    for f, d in registry():
+        pid = d.get("pid") or (int(f.stem) if f.stem.isdigit() else 0)
+        if pid and pid_alive(pid):
+            continue
+        done.append(f"registry {f.stem} ({d.get('name', '?')})")
+        if not dry:
+            f.unlink(missing_ok=True)
+            for k in f.parent.glob(f"{f.stem}.*.key"):
+                k.unlink(missing_ok=True)
+            sock = d.get("messagingSocketPath")
+            if sock:
+                Path(sock).unlink(missing_ok=True)
+    return done
+
+
+def gc_orphan_team_dirs(cfg: dict, dry: bool) -> list[str]:
+    """~/.claude/teams/<team>/ (members = every worker ever spawned, never pruned) and ~/.claude/tasks/<team>/
+    of sessions that no longer run. `leadSessionId` is NOT the registry sessionId, so liveness is decided by the
+    lead's cwd: a team dir is kept while any live session runs in that cwd (conservative on purpose). A tasks dir
+    without its teams dir belongs to an ended session (the config is dropped on /exit, tasks persist). Live leads'
+    dirs are never touched: pruning a live config races with the process."""
+    live_cwds = {d.get("cwd") for _, d in registry() if pid_alive(d.get("pid", 0))}
+    min_age = cfg["gc"]["orphan_age_min"] * 60
+    teams_root, tasks_root, done = CLAUDE_HOME / "teams", CLAUDE_HOME / "tasks", []
+    def old(d: Path) -> bool:
+        return time.time() - max(p.stat().st_mtime for p in [d, *d.rglob("*")]) >= min_age
+    orphan_teams = set()
+    for d in (teams_root.iterdir() if teams_root.is_dir() else []):
+        cf = d / "config.json"
+        if not d.is_dir() or not cf.exists() or not old(d):
+            continue
+        try:
+            members = json.loads(cf.read_text()).get("members", [])
+            lead_cwd = next((m.get("cwd") for m in members if m.get("agentType") == "team-lead"), None)
+        except (OSError, json.JSONDecodeError, AttributeError):
+            continue
+        if lead_cwd and lead_cwd in live_cwds:
+            continue
+        orphan_teams.add(d.name); done.append(f"teams/{d.name}")
+        if not dry:
+            shutil.rmtree(d, ignore_errors=True)
+    for d in (tasks_root.iterdir() if tasks_root.is_dir() else []):
+        if not d.is_dir() or not old(d):
+            continue
+        if d.name in orphan_teams or not (teams_root / d.name).exists():
+            done.append(f"tasks/{d.name}")
+            if not dry:
+                shutil.rmtree(d, ignore_errors=True)
+    return done
+
+
+def gc_orphan_leads(cfg: dict, dry: bool) -> list[str]:
+    """A team's claude process still running while its programa workspace is gone → kill it (it can never be reached).
+
+    programa only: a Warp tab has no workspace to query, so "gone" can never be established there and nothing is
+    ever killed — a Warp session that died is `teams up --resume`'s job (it reopens the tab), not gc's."""
+    st = load_state()
+    if not st or terminal_backend(cfg) != "programa" or not in_programa():
+        return []
+    done = []
+    for t in cfg["teams"]:
+        ws = st.get("workspaces", {}).get(t["name"])
+        if not ws or workspace_exists(ws) is not False:      # None = programa unreachable: unknown, never kill on a failed query
+            continue
+        sid = session_info(t["name"]).get("session_id")
+        for _, d in registry():
+            if sid and d.get("sessionId") == sid and pid_alive(d.get("pid", 0)):
+                done.append(f"lead {t['name']} pid {d['pid']} (workspace {ws} gone)")
+                if not dry:
+                    os.kill(d["pid"], signal.SIGTERM)
+    return done
+
+
+def worker_transcript(si: dict, aid: str) -> Path | None:
+    tp, sid = si.get("transcript_path"), si.get("session_id")
+    return Path(tp).parent / sid / "subagents" / f"agent-{aid}.jsonl" if tp and sid else None
+
+
+def running_workers(si: dict) -> list[tuple[str, dict, float]]:
+    """(agent_id, record, idle_seconds) for workers started but not stopped in the current lead session."""
+    out = []
+    for aid, w in si.get("workers", {}).items():
+        if w.get("stopped"):
+            continue
+        p = worker_transcript(si, aid)
+        last = p.stat().st_mtime if p and p.exists() else w["started"]
+        out.append((aid, w, time.time() - max(last, w["started"])))
+    return out
+
+
+def gc_silent_workers(cfg: dict, dry: bool) -> list[str]:
+    """In-process workers cannot be killed from outside; only their lead can (TaskStop). When a worker has produced
+    nothing for gc.worker_idle_min, type ONE line into the lead's pane. That is the only LLM turn gc ever causes,
+    and only when there is actually something to kill.
+
+    programa only: typing into a pane is `programa send`, and Warp has no equivalent (same reason `teams msg` is
+    unsupported there), so under Warp this pass is skipped whole rather than detecting silences it cannot report."""
+    if terminal_backend(cfg) != "programa" or not in_programa():
+        return []
+    g, done, now = cfg["gc"], [], time.time()
+    for t in cfg["teams"]:
+        f = SESS / f"{t['name']}.json"
+        si = session_info(t["name"])
+        if not si.get("session_id") or not process_alive(t["name"]):
+            continue
+        changed = False
+        for aid, w, idle in running_workers(si):
+            if idle < g["worker_idle_min"] * 60 or now - w.get("nudged", 0) < g["nudge_every_min"] * 60:
+                continue
+            label = f"{w.get('name') or aid} ({w.get('type', '?')})"
+            done.append(f"nudge {t['name']}: worker {label} silent {int(idle // 60)}min")
+            if not dry:
+                line = f"GC - | worker {w.get('name') or aid} {w.get('type', '?')} silent {int(idle // 60)}min — TaskStop {aid} unless it is mid long command"
+                if load_state().get("surfaces", {}).get(t["name"]) and in_programa():
+                    programa("send", *team_target(t["name"]), line + "\n", check=False)
+                w["nudged"] = now; changed = True
+        if changed:
+            f.write_text(json.dumps(si, indent=2))
+    return done
+
+
+def gc_once(cfg: dict, dry: bool) -> list[str]:
+    acts = [*gc_stale_registry(dry), *gc_orphan_team_dirs(cfg, dry), *gc_orphan_leads(cfg, dry), *gc_silent_workers(cfg, dry)]
+    if acts and not dry:
+        with open(cfg["shared_abs"] / "LOG.md", "a") as fh:
+            fh.write(f"{datetime.now():%H:%M:%S} gc | " + "; ".join(acts) + "\n")
+    return acts
+
+
+def cmd_gc(cfg: dict, a):
+    if not a.loop:
+        acts = gc_once(cfg, a.dry_run)
+        print("\n".join((("would: " if a.dry_run else "") + x) for x in acts) if acts else "gc: nothing to do")
+        return
+    while True:
+        try:
+            for x in gc_once(cfg, a.dry_run):
+                print(f"{datetime.now():%H:%M:%S} {x}", flush=True)
+        except (Exception, SystemExit) as e:                # never let the loop die on a transient error (die() raises SystemExit)
+            print(f"{datetime.now():%H:%M:%S} gc pass skipped: {e}", file=sys.stderr, flush=True)
+        if not load_state():                                # `teams down` removed the state → stop
+            return
+        time.sleep(cfg["gc"]["interval_sec"])
+
+
+def gc_start(cfg: dict):
+    """Detached `teams gc --loop` (inherits the programa env so it can type nudges; under Warp it inherits nothing
+    useful and the loop is limited to the two ~/.claude sweeps). Its pid lives in state."""
+    st = load_state()
+    if st.get("gc_pid") and pid_alive(st["gc_pid"]):
+        return
+    log = open(HERE / ".state" / "gc.log", "a")
+    p = subprocess.Popen([sys.executable, str(SELF), "--config", str(cfg["_path"]), "gc", "--loop"],
+                         stdout=log, stderr=log, stdin=subprocess.DEVNULL, start_new_session=True)
+    save_state({**load_state(), "gc_pid": p.pid})
+
+
+def gc_stop():
+    pid = load_state().get("gc_pid")
+    if pid and pid_alive(pid):
+        os.kill(pid, signal.SIGTERM)
 
 
 # ---------- commands ---------------------------------------------------------
@@ -824,7 +1042,8 @@ def cmd_up(cfg: dict, a):
         programa("send", "--workspace", workspaces[t["name"]], "--surface", surfaces[t["name"]],
                  shell_line(claude_cmd(cfg, t, surfaces)) + "\n")
     programa("select-workspace", "--workspace", workspaces[primary["name"]], check=False)
-    print(f"\n{primary['name']} is selected - talk to it there. `teams down` closes everything.")
+    gc_start(cfg)
+    print(f"\n{primary['name']} is selected - talk to it there. `teams down` closes everything. gc every {cfg['gc']['interval_sec']}s → .state/gc.log")
 
 
 def session_info(name: str) -> dict:
@@ -881,7 +1100,8 @@ def process_alive(name: str) -> bool:
         r = subprocess.run(["ps", "-o", "command=", "-p", str(pid)], capture_output=True, text=True)
         return "claude" in r.stdout
     st = load_state()
-    tty = surface_tty(st.get("workspaces", {}).get(name, ""), st.get("surfaces", {}).get(name, ""))
+    ws, surf = st.get("workspaces", {}).get(name), st.get("surfaces", {}).get(name)
+    tty = surface_tty(ws, surf) if ws and surf else None
     if tty:
         r = subprocess.run(["ps", "-t", tty, "-o", "command="], capture_output=True, text=True)
         return any("/claude" in l or l.startswith("claude") for l in r.stdout.splitlines())
@@ -891,11 +1111,14 @@ def process_alive(name: str) -> bool:
     return False
 
 
-def workspace_exists(ws: str) -> bool:
-    try:
-        return ws in programa("--json", "list-workspaces") if in_programa() else False
-    except SystemExit:
-        return False
+def workspace_exists(ws: str) -> bool | None:
+    """True/False when programa answered; None when it could not be asked (socket down, not in programa) — callers must treat None as 'unknown', never as 'gone'."""
+    if not in_programa():
+        return None
+    r = subprocess.run(["programa", "--json", "list-workspaces"], capture_output=True, text=True)
+    if r.returncode != 0 or not r.stdout.strip():
+        return None
+    return ws in r.stdout
 
 
 def plan_summary(cfg: dict) -> str:
@@ -904,7 +1127,7 @@ def plan_summary(cfg: dict) -> str:
         return "PLAN.md: none"
     rows = [l for l in f.read_text().splitlines() if l.startswith("|") and not set(l) <= set("|- ")]
     tasks = [[c.strip() for c in l.strip("|").split("|")] for l in rows[1:]] if rows else []
-    tasks = [t for t in tasks if t and re.fullmatch(r"T\d+", t[0])]
+    tasks = [t for t in tasks if t and re.fullmatch(r"[A-Z]+\d+", t[0])]   # T1 (code), D1/F1 (design pipeline)
     if not tasks:
         return "PLAN.md: no tasks yet"
     by = {}
@@ -914,6 +1137,21 @@ def plan_summary(cfg: dict) -> str:
     title = next((l[2:] for l in f.read_text().splitlines() if l.startswith("# ")), "")
     return f"PLAN.md: {title} — " + ", ".join(f"{v} {k}" for k, v in by.items()) + "\n  " + "\n  ".join(
         f"{t[0]} [{t[1]}] {t[4] if len(t)>4 else '?':6} {t[2][:60]}" for t in tasks)
+
+
+def design_summary(cfg: dict) -> str:
+    """One line per status from shared/design/MANIFEST.md (| name | nodeId | ... | status | ...). Zero tokens."""
+    f = cfg["shared_abs"] / "design" / "MANIFEST.md"
+    if not f.is_file():
+        return ""
+    counts = {}
+    for line in f.read_text().splitlines():
+        m = re.match(r"^\|\s*(?!name\b|-)([^|]+?)\s*\|.*\|\s*(todo|autolayout|extracted|implemented|qa-ok|qa-diff|stale)\s*\|", line)
+        if m:
+            counts[m.group(2)] = counts.get(m.group(2), 0) + 1
+    if not counts:
+        return "design: MANIFEST.md present, no blocks yet"
+    return "design blocks: " + ", ".join(f"{k} {v}" for k, v in counts.items())
 
 
 def cmd_status(cfg: dict, a):
@@ -926,8 +1164,17 @@ def cmd_status(cfg: dict, a):
         alive = process_alive(t["name"])
         state = si.get("status", "?") if alive else "DEAD"
         ws = st.get("workspaces", {}).get(t["name"], "?")
-        print(f"  {t['name']:10} {state:8} {ws:14} last {si.get('updated','-')[11:]:8} sid {str(si.get('session_id','-'))[:8]}  {session_name(cfg, t)}")
+        run = running_workers(si) if alive else []
+        ndone = sum(1 for w in si.get("workers", {}).values() if w.get("stopped"))
+        wk = f"workers {len(run)} running" + (" (" + ", ".join(f"{w.get('name') or aid[:6]} {int(idle//60)}m" for aid, w, idle in run) + ")" if run else "") + f", {ndone} done"
+        print(f"  {t['name']:10} {state:8} {ws:14} last {si.get('updated','-')[11:]:8} sid {str(si.get('session_id','-'))[:8]}  {session_name(cfg, t)}  {wk}")
+    gp = st.get("gc_pid")
+    scope = ("~/.claude sweeps only — lead kills and nudges need programa" if terminal_backend(cfg) == "warp"
+             else f"worker idle > {cfg['gc']['worker_idle_min']}min → nudge")
+    print(f"\ngc: {'running' if gp and pid_alive(gp) else 'NOT running'} (every {cfg['gc']['interval_sec']}s, {scope})")
     print("\n" + plan_summary(cfg))
+    if design_summary(cfg):
+        print("\n" + design_summary(cfg))
     log = cfg["shared_abs"] / "LOG.md"
     if log.exists():
         lines = [l for l in log.read_text().splitlines() if l.strip()]
@@ -962,6 +1209,7 @@ def cmd_resume(cfg: dict, ordered: list, primary: dict):
     with open(cfg["shared_abs"] / "LOG.md", "a") as fh:
         fh.write(f"\n## resume {datetime.now():%Y-%m-%d %H:%M}\n")
     programa("select-workspace", "--workspace", workspaces[primary["name"]], check=False)
+    gc_start(cfg)
 
 
 def usage_of(path: Path) -> dict:
@@ -1037,16 +1285,21 @@ def cmd_msg(cfg: dict, a):
 
 def cmd_down(cfg: dict, a):
     st = load_state()
+    gc_stop()                                                # both backends: the loop would keep running after the state is gone
     if st.get("terminal") == "warp":
-        return warp_down(cfg, st)
-    for name, surf in st.get("surfaces", {}).items():
-        programa("send", "--workspace", st["workspaces"][name], "--surface", surf, "/exit\n", check=False)
-    for name, ws in st.get("workspaces", {}).items():
-        programa("close-workspace", "--workspace", ws, check=False)
-        print(f"[{name}] closed {ws}")
-    with open(cfg["shared_abs"] / "LOG.md", "a") as fh:
-        fh.write(f"## down {datetime.now():%Y-%m-%d %H:%M}\n")
-    STATE.unlink(missing_ok=True)
+        warp_down(cfg, st)
+    else:
+        for name, surf in st.get("surfaces", {}).items():
+            programa("send", "--workspace", st["workspaces"][name], "--surface", surf, "/exit\n", check=False)
+        for name, ws in st.get("workspaces", {}).items():
+            programa("close-workspace", "--workspace", ws, check=False)
+            print(f"[{name}] closed {ws}")
+        with open(cfg["shared_abs"] / "LOG.md", "a") as fh:
+            fh.write(f"## down {datetime.now():%Y-%m-%d %H:%M}\n")
+        STATE.unlink(missing_ok=True)
+    time.sleep(2)                                            # let /exit land, then sweep what the sessions left behind
+    for x in [*gc_stale_registry(False), *gc_orphan_team_dirs({**cfg, "gc": {**cfg["gc"], "orphan_age_min": 0}}, False)]:
+        print(f"gc: {x}")
 
 
 def cmd_cmd(cfg: dict, a):
@@ -1076,6 +1329,7 @@ def main():
     s = sub.add_parser("up"); s.add_argument("--dry-run", action="store_true"); s.add_argument("--resume", action="store_true"); s.add_argument("--only", metavar="TEAM")
     sub.add_parser("status")
     sub.add_parser("cost")
+    s = sub.add_parser("gc"); s.add_argument("--loop", action="store_true"); s.add_argument("--dry-run", action="store_true")
     s = sub.add_parser("learn"); s.add_argument("team", nargs="?", default="all"); s.add_argument("--model", default="claude-sonnet-5"); s.add_argument("--force", action="store_true"); s.add_argument("--dry-run", action="store_true")
     s = sub.add_parser("init"); s.add_argument("repo", nargs="+"); s.add_argument("--out"); s.add_argument("--force", action="store_true")
     s = sub.add_parser("msg"); s.add_argument("team"); s.add_argument("text", nargs="+")
@@ -1089,8 +1343,8 @@ def main():
     if a.cmd == "init":
         return cmd_init(a)
     cfg = load(a.config)
-    {"up": cmd_up, "status": cmd_status, "cost": cmd_cost, "learn": cmd_learn, "msg": cmd_msg, "down": cmd_down,
-     "cmd": cmd_cmd, "_run": cmd_run}[a.cmd](cfg, a)
+    {"up": cmd_up, "status": cmd_status, "cost": cmd_cost, "gc": cmd_gc, "learn": cmd_learn, "msg": cmd_msg,
+     "down": cmd_down, "cmd": cmd_cmd, "_run": cmd_run}[a.cmd](cfg, a)
 
 
 if __name__ == "__main__":

@@ -14,11 +14,23 @@
     "terminal — \"auto\" (défaut): programa si on tourne dedans, sinon Warp (TERM_PROGRAM=WarpTerminal). Forcer avec \"programa\" | \"warp\". En Warp: 1 onglet par team dans la fenêtre courante, `teams msg` indisponible.",
     "prices_per_mtok — optionnel: { \"<model>\": {\"in\",\"out\",\"cache_read\",\"cache_write\"} } en $/M tokens pour que `teams cost` affiche des dollars.",
     "WORKERS D'ÉCRITURE — worker-writer / worker-researcher / worker-analyst (agents/) : pour les teams qui livrent des documents (marketing). workers_replace: true les isole des workers de code.",
-    "`learn: false` sur une team = pas de digest `teams learn` ni d'avertissement de fraîcheur (team qui ne lit pas un repo de code). `bin/teams up --only <team>` démarre une seule team dans son onglet sans toucher aux sessions vivantes (Warp seulement)."
+    "`learn: false` sur une team = pas de digest `teams learn` ni d'avertissement de fraîcheur (team qui ne lit pas un repo de code, ex: design dont le cwd est shared/design). `bin/teams up --only <team>` démarre une seule team dans son onglet sans toucher aux sessions vivantes (Warp seulement).",
+    "gc — housekeeping loop started by `teams up`, zero LLM tokens: interval_sec (300), worker_idle_min (10: a worker silent that long → one line typed to its lead, who TaskStops it), nudge_every_min (30), orphan_age_min (10: dead sessions' ~/.claude/teams|tasks dirs older than this are removed).",
+    "  En Warp, gc ne fait que le ménage de ~/.claude (registry + dossiers orphelins): pas de workspace programa à interroger, donc ni kill de lead ni nudge.",
+    "disallowed_tools — defaults.disallowed_tools + team.disallowed_tools → --disallowedTools (lead + workers; wildcards ok, tools removed from context). `disallowed_tools_replace: true` ignores the defaults for that team.",
+    "  Figma arrives in EVERY session via the claude.ai connector (mcp__claude_ai_Figma__*): denied by default, allowed only for design. Same trick works for any connector a team doesn't need.",
+    "plugins — plugins disabled at user scope but enabled for this team only (--settings enabledPlugins). Note: plugin MCP servers may not load this way; the figma plugin is NOT needed by design (connector + tools/figma/ replace its skills).",
+    "agents/<w>.md frontmatter `tools: A, B` — restricts that worker's tools. CAUTION: any list removes ToolSearch, so deferred MCP tools become unreachable; leave it out for workers that use MCP."
   ],
   "shared_dir": "shared",
   "permission_mode": "yolo",
   "terminal": "auto",
+  "gc": {
+    "interval_sec": 300,
+    "worker_idle_min": 10,
+    "nudge_every_min": 30,
+    "orphan_age_min": 10
+  },
   "defaults": {
     "model": "claude-fable-5",
     "add_dirs": [],
@@ -30,19 +42,23 @@
         "model": "claude-opus-5"
       }
     },
-    "runner": "claude"
+    "runner": "claude",
+    "disallowed_tools": [
+      "mcp__claude_ai_Figma__*"
+    ]
   },
   "teams": [
     {
       "name": "gestion",
-      "title": "Michel",
+      "title": "Lucy",
       "primary": true,
       "cwd": "..",
       "prompt": "gestion.md",
       "purpose": "Planifie la feature avec l'utilisateur, dispatche aux autres teams, contrôle l'avancement. Ne code pas.",
       "add_dirs": [
         "../sample-backend",
-        "../sample-frontend"
+        "../sample-frontend",
+        "shared/design"
       ]
     },
     {
@@ -83,6 +99,46 @@
           "model": "claude-opus-5"
         }
       }
+    },
+    {
+      "name": "design",
+      "title": "Design",
+      "cwd": "shared/design",
+      "prompt": "design.md",
+      "learn": false,
+      "purpose": "Découpe et normalise les maquettes Figma (autolayout) en specs compactes pour frontend; QA visuelle du résultat. Seule team avec Figma.",
+      "disallowed_tools": [
+        "mcp__claude_ai_Figma__generate_figma_design",
+        "mcp__claude_ai_Figma__generate_diagram",
+        "mcp__claude_ai_Figma__create_new_file",
+        "mcp__claude_ai_Figma__export_video",
+        "mcp__claude_ai_Figma__get_figjam",
+        "mcp__claude_ai_Figma__upload_assets",
+        "mcp__claude_ai_Figma__weave_*",
+        "mcp__claude_ai_Figma__*shader*",
+        "mcp__claude_ai_Figma__*code_connect*"
+      ],
+      "add_dirs": [
+        "tools",
+        "../sample-frontend"
+      ],
+      "workers": {
+        "worker-simple": false,
+        "worker-complex": false,
+        "design-split": {
+          "model": "claude-fable-5"
+        },
+        "design-extract": {
+          "model": "claude-sonnet-5"
+        },
+        "design-autolayout": {
+          "model": "claude-sonnet-5"
+        },
+        "design-vision": {
+          "model": "claude-fable-5"
+        }
+      },
+      "disallowed_tools_replace": true
     }
   ],
   "runners": {
