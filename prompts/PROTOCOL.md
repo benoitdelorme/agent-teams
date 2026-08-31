@@ -24,6 +24,8 @@ Types (the only ones allowed):
 | ANSWER    | any → any                    | reply to ASK. Body: the answer, nothing else.    | none               |
 | CONTRACT  | frontend ↔ backend           | API shape proposal/agreement. Body: pointer to `shared/CONTRACTS.md` section + 1-line diff summary. | ANSWER (`agree` / objection) |
 | STATUS    | gestion → any (rare)         | request state. Body: none.                       | one-line answer    |
+| SPEC      | design → frontend            | specs ready. Body: pointer to `shared/design/MANIFEST.md` (+ blocks/components list). | none |
+| SPEC-DIFF | design → frontend            | visual QA gaps. Body: pointer to `shared/design/qa/<block>.md` per block + count. | DONE (fix) |
 
 ## Hard rules
 - No greetings, no thanks, no "received", no recap of what the other said. Silence = ack.
@@ -51,4 +53,10 @@ CONTRACT T4 | shared/CONTRACTS.md#archive — added `archived: bool` to Project
 ```
 ```
 ANSWER T4 | agree
+```
+```
+SPEC D1 | shared/design/MANIFEST.md — pricing: 7 blocks, 3 components (Button, Card, Badge)
+```
+```
+SPEC-DIFF F3 | shared/design/qa/plan-cards.md — 4 diffs (2 high)
 ```

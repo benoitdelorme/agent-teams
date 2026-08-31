@@ -1,0 +1,7 @@
+# qa: home/closeup (desktop 1440, ref/closeup@800.png vs qa/closeup.png)
+
+high photo stack (cable-hand) — expected: lamp shade spans x≈190→1240, shade top y≈333, shade bottom y≈665, hand exits frame at bottom-right (y≈770→960) / got: shade spans x≈190→1135 (~10% narrower), top y≈260, bottom y≈550 (photo ~95px too high and smaller), hand exits at y≈600→880 with empty beige below the arm
+high block height / next block intrusion — expected: block is 960px tall, bottom 10px shows dark strip of the underlying photo / got: a different block (dark-brown strip + a lit lamp fragment + beige) is visible in the bottom ≈32px (y≈928→960); closeup ends ~30px short or the stack is not clipped/positioned to 960
+med right edge — expected: cable-hand 11px short of right edge, dark photo strip visible behind it / got: ≈27px light/white strip along the full right edge (no dark photo behind; either the frame is narrower than 1440 or the background layers are missing on the right)
+med focal-statement heading overlap — expected: heading bottom intrudes 133px into the top of the block / got: "SPACE BECOMES COMPOSED." bottom sits at ≈117px (≈16px less overlap) — verify with focal-statement QA, may be the same vertical offset as the photo
+low background layers — expected: stem-bg-dark / surface-x2 visible only as the thin dark strips at right and bottom edges / got: no dark strip anywhere; cannot confirm the two background images are rendered (hidden by the main photo, so low unless the edges are fixed and they still do not appear)
