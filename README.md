@@ -34,6 +34,7 @@ In Warp, `up` opens one tab per team in the **current window** (same tab colour;
 - `teams msg` is unsupported (Warp has no API to type into a tab) — the teams talk through `SendMessage`.
 - `teams down` stops the sessions and closes their tabs (Warp has no API for this: it hangs up the tab's shell).
 - `teams up --resume` closes the dead teams' tabs and reopens them, in whatever window is active.
+- The board runs (detached, not in a tab) and reads/writes the tickets normally, but moving one to TODO cannot wake gestion — tell it yourself.
 
 ## The board (kanban web UI)
 
@@ -42,7 +43,7 @@ In Warp, `up` opens one tab per team in the **current window** (same tab colour;
 - **Files are the source of truth.** One ticket = one markdown file `shared/tasks/T<n>.md` (frontmatter + `## Description / ## Criteria / ## Log`). The board watches them and updates live over SSE; agents just edit files.
 - **Two entry doors, one data path.** Create tickets on the board (backlog → groom → drag to TODO, which wakes gestion with one line typed in its terminal) or talk to gestion, which creates the same files via `teams task new`. Ids (`T<n>`) come from one atomic counter — a Jira key is an optional label on top (`board.jira_base_url` in teams.json makes it a link).
 - **Traces for free.** The SendMessage hook mirrors every `TASK/DONE/BLOCKED T<n>` message into the ticket's `## Log` and updates its status (TASK→doing, DONE→qa, BLOCKED→flag). Backlog is never read by gestion.
-- Zero dependency: the server is stdlib Python (`bin/teams-board`), the UI one static HTML file. Inside programa it runs as a "board" tab next to gestion's session (required: `programa send` only accepts clients living in a real pane, so a detached server could not wake gestion). `teams board [--port N]` starts it alone; `teams down` stops it.
+- Zero dependency: the server is stdlib Python (`bin/teams-board`), the UI one static HTML file. Inside programa it runs as a "board" tab next to gestion's session (required: `programa send` only accepts clients living in a real pane, so a detached server could not wake gestion); under Warp or no terminal it runs detached and the wake-up is dropped with a line in `.state/board.log`. `teams board [--port N]` starts it alone; `teams down` stops it.
 
 ```bash
 bin/teams task new "Fix login redirect" --jira LUM-482   # → T7

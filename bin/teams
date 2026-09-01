@@ -630,6 +630,7 @@ def warp_up(cfg: dict, ordered: list, primary: dict):
     for t in ordered:                                     # primary last -> it is the focused tab
         warp_open_tab(stems[t["name"]])
         print(f"[{t['name']}] warp tab {t.get('title', t['name'])!r} ({t['cwd_abs']})")
+    start_board(cfg)
     print(f"\n{primary['name']} is the last tab opened, so it has the focus - talk to it there."
           f"\nWarp cannot group tabs from a config: the {len(ordered)} tabs share the colour {WARP_COLOR}; "
           f"select them and right-click > New group with tabs to group them.\n`teams down` stops the sessions.")
@@ -663,7 +664,6 @@ def warp_up_only(cfg: dict, name: str):
 
 
 def warp_resume(cfg: dict, ordered: list, primary: dict):
-    import signal
     st = load_state()
     if not st:
         die("nothing to resume (no state) — run `teams up`")
@@ -694,11 +694,11 @@ def warp_resume(cfg: dict, ordered: list, primary: dict):
         print(f"[{t['name']}] restarted with --continue")
     with open(cfg["shared_abs"] / "LOG.md", "a") as fh:
         fh.write(f"\n## resume {datetime.now():%Y-%m-%d %H:%M}\n")
+    start_board(cfg)
     print(f"\n{len(dead)} tab(s) reopened in the ACTIVE Warp window.")
 
 
 def warp_down(cfg: dict, st: dict):
-    import signal
     pending = []
     shells, left = {}, []
     for name in st.get("workspaces", {}):
@@ -736,6 +736,7 @@ def warp_down(cfg: dict, st: dict):
             left.append(name)
     for stem in st.get("tab_configs", {}).values():
         (WARP_TABS / f"{stem}.toml").unlink(missing_ok=True)
+    stop_board()
     with open(cfg["shared_abs"] / "LOG.md", "a") as fh:
         fh.write(f"## down {datetime.now():%Y-%m-%d %H:%M}\n")
     STATE.unlink(missing_ok=True)
@@ -985,7 +986,7 @@ def start_board(cfg: dict, port: int | None = None):
     """Start the board server. Inside programa it MUST live in a real pane (a detached/orphaned
     process gets 'Broken pipe' from `programa send`, so it could never wake gestion) — it runs as
     an extra TAB in gestion's pane (fallback: the current pane), so it adds no workspace.
-    Outside programa: detached subprocess (board usable, no wake)."""
+    Under Warp / no terminal: detached subprocess (board usable, no wake)."""
     st = board_state()
     if board_alive(st):
         print(f"board → {st.get('url')} (already running)")
@@ -993,7 +994,8 @@ def start_board(cfg: dict, port: int | None = None):
     BOARD_STATE.parent.mkdir(exist_ok=True)
     BOARD_STATE.unlink(missing_ok=True)
     cmd = [sys.executable, str(BOARD_BIN), "--root", str(HERE)] + (["--port", str(port)] if port else [])
-    if in_programa():
+    hosted = terminal_backend(cfg) == "programa"   # only programa can host the tab AND be typed into
+    if hosted:
         bws = board_ws_state()
         if not (bws.get("workspace") and bws.get("surface") and surface_exists(bws["workspace"], bws["surface"])):
             ws, pane = gestion_pane(cfg)
@@ -1020,6 +1022,8 @@ def start_board(cfg: dict, port: int | None = None):
         st = board_state()
         if st.get("url") and board_alive(st):
             print(f"board → {st['url']}")
+            if not hosted:
+                print("board: read/write only — moving a ticket to TODO cannot wake gestion outside programa; tell it yourself.")
             return
     print("board: failed to start — see the board tab in gestion's pane (or .state/board.log)")
 
