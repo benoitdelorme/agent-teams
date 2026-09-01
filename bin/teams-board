@@ -75,8 +75,15 @@ def _send_gestion(text: str) -> bool:
         surf = st["surfaces"][CTX["primary"]]
     except (OSError, KeyError, json.JSONDecodeError):
         return True                              # teams not up — drop silently (board works standalone)
-    r = subprocess.run(["programa", "send", "--workspace", ws, "--surface", surf, text + "\n"],
-                       capture_output=True, text=True)
+    if st.get("terminal") == "warp" or not surf:
+        print(f"not sent (Warp has no API to type into a tab): {text}", file=sys.stderr)
+        return True                              # no channel — drop, never queue forever
+    try:
+        r = subprocess.run(["programa", "send", "--workspace", ws, "--surface", surf, text + "\n"],
+                           capture_output=True, text=True)
+    except OSError:                              # programa not installed
+        print(f"not sent (programa unavailable): {text}", file=sys.stderr)
+        return True
     if r.returncode != 0:
         print(f"notify failed (will retry): {r.stderr.strip()[:200]}", file=sys.stderr)
     return r.returncode == 0
@@ -85,7 +92,8 @@ def _send_gestion(text: str) -> bool:
 def notify_gestion(text: str):
     """Type one line into gestion's terminal, off the request thread. Transient socket
     failures happen (the board is a detached process): retry immediately twice, then hand
-    over to the watcher's retry queue so a wake-up is never lost while the board lives."""
+    over to the watcher's retry queue so a wake-up is never lost while the board lives.
+    Outside programa there is no channel at all: `_send_gestion` drops the line instead."""
     def run():
         for delay in (0, 0.5, 1.5):
             time.sleep(delay)

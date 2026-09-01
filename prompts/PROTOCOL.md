@@ -3,8 +3,8 @@
 Goal: minimum tokens, zero ambiguity. Silence is the default. A message costs; only send when it changes what the recipient will do.
 
 ## Channel
-1. Primary: `SendMessage({to: "<team>", message})` — team names come from ROSTER. Confirm names once with `ListAgents` at start (match by prefix if suffixed).
-2. Fallback (only if SendMessage errors): `programa send --surface <surface> "<text>\n"` using surfaces from `shared/.roster.json`.
+1. Primary: `SendMessage({to: "<session>", message})` — `to` is the `session=` name from ROSTER, never the bare team name. Confirm it once with `ListAgents` at start (match by prefix if suffixed).
+2. Fallback (programa only; if `.roster.json` has no surface, there is no fallback — retry SendMessage after confirming the name with ListAgents): `programa send --surface <surface> "<text>\n"`.
 Never use both for the same message.
 
 ## Message format — one message = one line header + optional body
@@ -34,6 +34,7 @@ Types (the only ones allowed):
 - Detail lives in files, not messages: tasks in `SHARED_DIR/tasks/T<n>.md`, API shapes in `shared/CONTRACTS.md`. Update the file, then send the 1-line pointer.
 - Messages whose header carries a `T<n>` ref are mirrored into that ticket's `## Log` (and TASK/DONE/BLOCKED update its status/flags) automatically by hooks. Never send a message whose only purpose is a status update.
 - Do not poll. Replies arrive as new turns in your session; end your turn and wait. STATUS at most once per task, only if a DONE/BLOCKED is overdue.
+- Only gestion talks to the human. A question for the human from any other team = one batched `ASK gestion`; gestion asks, then `ANSWER`s. Never wait for the human in your own tab.
 - Language: messages in English (denser). Talk to the human in French.
 
 ## Examples
