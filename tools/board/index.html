@@ -4,171 +4,211 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Board</title>
-<style>
-  :root{
-    --bg:#0e1013; --panel:#13161a; --card:#181c21; --card-hover:#1e232a;
-    --border:#252b33; --border-soft:#1d2229;
-    --text:#e7e9ec; --muted:#8b929c; --dim:#5a616c;
-    --accent:#5aa9ff; --red:#ff6161; --green:#3ecf8e; --amber:#f5b83d;
-    --violet:#a78bfa; --cyan:#4dd0e1; --pink:#f06292;
-    --r:10px; --r-sm:7px;
-    --font:"Inter","SF Pro Text",-apple-system,system-ui,"Segoe UI",Roboto,sans-serif;
-    --mono:"SF Mono","JetBrains Mono",ui-monospace,Menlo,monospace;
-  }
-  *{box-sizing:border-box;margin:0;padding:0}
-  html,body{height:100%}
-  body{background:var(--bg);color:var(--text);font:14px/1.45 var(--font);
-       -webkit-font-smoothing:antialiased;overflow:hidden}
-  button,input,textarea,select{font:inherit;color:inherit}
-  ::selection{background:rgba(90,169,255,.25)}
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4.3.3"></script>
+<style type="text/tailwindcss">
+/* ══ tokens ══ the whole system is declared here and nowhere else ══════════ */
+@theme {
+  /* ground — cool ink with a violet cast: deep without going muddy or flat black */
+  --color-ink-950:#0D0C13;  /* page            */
+  --color-ink-900:#15141D;  /* column, sidebar */
+  --color-ink-850:#1C1B26;  /* card, field     */
+  --color-ink-800:#252331;  /* card hovered    */
+  --color-ink-750:#201E2B;  /* edge, felt      */
+  --color-ink-700:#322F42;  /* edge, seen      */
+  --color-ink-600:#413D55;  /* edge, approached*/
 
-  /* ---------- header ---------- */
-  header{display:flex;align-items:center;gap:14px;height:52px;padding:0 18px;
-         border-bottom:1px solid var(--border-soft);background:var(--panel)}
-  .brand{display:flex;align-items:baseline;gap:9px;white-space:nowrap}
-  .brand b{font-size:14.5px;font-weight:650;letter-spacing:.1px}
-  .brand span{color:var(--muted);font-size:13px;max-width:34vw;overflow:hidden;
-              text-overflow:ellipsis;white-space:nowrap}
-  #search{flex:0 1 260px;margin-left:auto;background:var(--card);border:1px solid var(--border);
-          border-radius:var(--r-sm);padding:5px 11px;font-size:13px;outline:none;color:var(--text)}
-  #search::placeholder{color:var(--dim)}
-  #search:focus{border-color:#33507a}
-  #teams{display:flex;gap:6px}
-  .pill{display:flex;align-items:center;gap:6px;padding:3.5px 10px;border:1px solid var(--border);
-        border-radius:99px;font-size:12px;color:var(--muted);background:var(--card)}
-  .pill i{width:7px;height:7px;border-radius:50%;background:var(--dim);flex:none}
-  .pill.working i{background:var(--green);box-shadow:0 0 6px rgba(62,207,142,.7)}
-  .pill.idle i{background:var(--amber)}
-  .pill.gone i{background:var(--red)}
-  #conn{width:8px;height:8px;border-radius:50%;background:var(--red);flex:none;transition:background .3s}
-  #conn.on{background:var(--green)}
+  /* ink */
+  --color-paper:#EFEDF7;
+  --color-mute:#A29EBB;
+  --color-faint:#6D6889;
 
-  /* ---------- board ---------- */
-  main{display:grid;grid-template-columns:repeat(5,minmax(232px,1fr));gap:12px;
-       height:calc(100% - 52px);padding:14px 16px 16px;overflow-x:auto}
-  .col{display:flex;flex-direction:column;min-width:0;border-radius:var(--r);
-       background:var(--panel);border:1px solid var(--border-soft);transition:border-color .12s, background .12s}
-  .col.drop{border-color:#3a577f;background:#151a21}
-  .col-head{display:flex;align-items:center;gap:8px;padding:11px 13px 9px}
-  .col-head h2{font-size:12px;font-weight:650;letter-spacing:.7px;text-transform:uppercase;color:var(--muted)}
-  .col-head .n{font-size:11.5px;color:var(--dim);background:var(--card);border:1px solid var(--border);
-               border-radius:99px;padding:1px 7px;font-family:var(--mono)}
-  .col-head .add{margin-left:auto;width:22px;height:22px;border:1px solid var(--border);background:var(--card);
-                 border-radius:6px;color:var(--muted);cursor:pointer;font-size:14px;line-height:1}
-  .col-head .add:hover{color:var(--text);border-color:#3a4250}
-  .col-list{flex:1;overflow-y:auto;padding:2px 9px 12px;display:flex;flex-direction:column;gap:8px;scrollbar-width:thin;scrollbar-color:#2c333d transparent}
-  .col-list::-webkit-scrollbar{width:8px}
-  .col-list::-webkit-scrollbar-thumb{background:#2c333d;border-radius:4px}
-  .empty{border:1.5px dashed var(--border);border-radius:var(--r-sm);color:var(--dim);
-         font-size:12.5px;text-align:center;padding:18px 8px}
+  /* who is speaking — cool: agents at work. warm: a human is involved. */
+  --color-signal:#8B9DFF;   /* interactive, focus, TASK ASK CONTRACT NEW */
+  --color-signal-ink:#0B0D1F;
+  --color-good:#4FD6A9;     /* DONE ANSWER, stream live                  */
+  --color-alert:#FF6B81;    /* BLOCKED — and nothing else                */
+  --color-you:#F2B366;      /* human:, COMMENT, the keys you filed       */
 
-  .card{background:var(--card);border:1px solid var(--border);border-radius:var(--r-sm);
-        padding:9px 11px 8px;cursor:grab;user-select:none;-webkit-user-select:none;
-        transition:background .1s,border-color .1s;position:relative}
-  .card:hover{background:var(--card-hover);border-color:#323a45}
-  .card.blocked{border-left:3px solid var(--red);padding-left:9px}
-  .card.dragging{opacity:.3}
-  .card.hidden{display:none}
-  .chips{display:flex;align-items:center;gap:6px;margin-bottom:5px;flex-wrap:wrap}
-  .chip{font:11px/1 var(--mono);color:var(--muted);background:#12161b;border:1px solid var(--border);
-        border-radius:5px;padding:3px 6px}
-  .chip.jira{color:#7db3ff}
-  a.chip.jira:hover{border-color:#33507a;text-decoration:none}
-  .badge{font-size:10.5px;font-weight:600;letter-spacing:.4px;text-transform:uppercase;
-         border-radius:5px;padding:3px 7px}
-  .card h3{font-size:13.5px;font-weight:530;line-height:1.35;word-wrap:break-word}
-  .card .foot{display:flex;align-items:center;gap:8px;margin-top:7px;font-size:11.5px;color:var(--dim)}
-  .card .foot .bl{color:var(--red);font-weight:600}
-  #ghost{position:fixed;z-index:99;pointer-events:none;width:230px;transform:rotate(2.5deg);
-         box-shadow:0 12px 32px rgba(0,0,0,.55);opacity:.95}
+  /* roundness descends with an element's weight in the page */
+  --radius-shell:24px; --radius-col:20px; --radius-card:16px; --radius-field:14px;
 
-  .newform{display:flex}
-  .newform input{flex:1;background:var(--card);border:1px solid #33507a;border-radius:var(--r-sm);
-                 padding:8px 11px;font-size:13px;outline:none}
+  --font-sans:"Instrument Sans",-apple-system,system-ui,"Segoe UI",sans-serif;
+  --font-mono:"JetBrains Mono","SF Mono",ui-monospace,Menlo,monospace;
 
-  /* ---------- modal ---------- */
-  #backdrop[hidden]{display:none}
-  #backdrop{position:fixed;inset:0;background:rgba(5,7,9,.66);backdrop-filter:blur(2px);
-            display:flex;align-items:flex-start;justify-content:center;padding:5vh 16px;z-index:50;overflow-y:auto}
-  #modal{width:min(860px,100%);background:var(--panel);border:1px solid var(--border);
-         border-radius:14px;box-shadow:0 24px 70px rgba(0,0,0,.6);padding:22px 24px 20px}
-  .m-top{display:flex;align-items:center;gap:10px;margin-bottom:14px}
-  .m-top .chip{font-size:12px;padding:4px 8px}
-  .m-top .close{margin-left:auto;border:none;background:none;color:var(--dim);font-size:20px;cursor:pointer}
-  .m-top .close:hover{color:var(--text)}
-  #m-title{width:100%;background:none;border:1px solid transparent;border-radius:var(--r-sm);
-           font-size:19px;font-weight:640;padding:6px 8px;margin:-6px 0 14px -8px;outline:none}
-  #m-title:hover{border-color:var(--border)} #m-title:focus{border-color:#33507a;background:var(--card)}
-  .m-grid{display:grid;grid-template-columns:1fr 218px;gap:22px}
-  @media (max-width:720px){.m-grid{grid-template-columns:1fr}}
-  .f label{display:block;font-size:11px;font-weight:650;letter-spacing:.6px;text-transform:uppercase;
-           color:var(--dim);margin:0 0 5px}
-  .f{margin-bottom:15px}
-  textarea{width:100%;background:var(--card);border:1px solid var(--border);border-radius:var(--r-sm);
-           padding:9px 11px;font-size:13px;line-height:1.5;resize:vertical;min-height:64px;outline:none;
-           font-family:var(--font)}
-  textarea:focus{border-color:#33507a}
-  select,.side input[type=text]{width:100%;background:var(--card);border:1px solid var(--border);
-        border-radius:var(--r-sm);padding:7px 9px;font-size:13px;outline:none;appearance:none}
-  select:focus,.side input:focus{border-color:#33507a}
-  select{background-image:url('data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" width="10" height="6"><path d="M1 1l4 4 4-4" stroke="%238b929c" fill="none" stroke-width="1.5"/></svg>');
-         background-repeat:no-repeat;background-position:right 10px center;padding-right:26px;cursor:pointer}
-  .side .meta{font-size:12px;color:var(--dim);line-height:1.8;font-family:var(--mono)}
-  .switch{display:flex;align-items:center;gap:9px;cursor:pointer;font-size:13px;color:var(--muted)}
-  .switch input{accent-color:var(--red);width:15px;height:15px}
-  .danger{border:1px solid transparent;background:none;color:var(--dim);font-size:12px;cursor:pointer;
-          padding:5px 8px;border-radius:var(--r-sm);margin-top:6px}
-  .danger:hover{color:var(--red);border-color:rgba(255,97,97,.35)}
+  --ease-enter:cubic-bezier(.2,.7,.3,1);
+}
 
-  #m-log{background:#0f1216;border:1px solid var(--border-soft);border-radius:var(--r-sm);
-         padding:6px 0;max-height:300px;overflow-y:auto}
-  #m-log:empty{display:none}
-  .log-line{display:flex;gap:10px;padding:4px 12px;font-size:12.5px}
-  .log-line:hover{background:#13171d}
-  .log-line time{color:var(--dim);font-family:var(--mono);font-size:11.5px;padding-top:1px;flex:none}
-  .log-line .t-DONE{color:var(--green);font-weight:600}
-  .log-line .t-BLOCKED{color:var(--red);font-weight:600}
-  .log-line .t-TASK{color:var(--accent);font-weight:600}
-  .log-line .t-human{color:var(--amber);font-weight:600}
-  .comment{display:flex;gap:8px;margin-top:10px;align-items:center}
-  .comment input[type=text]{flex:1;background:var(--card);border:1px solid var(--border);
-        border-radius:var(--r-sm);padding:8px 11px;font-size:13px;outline:none}
-  .comment input[type=text]:focus{border-color:#33507a}
-  .comment label{display:flex;align-items:center;gap:5px;font-size:12px;color:var(--dim);white-space:nowrap;cursor:pointer}
-  .comment button{background:#1c2b40;border:1px solid #33507a;color:#cfe3ff;border-radius:var(--r-sm);
-                  padding:8px 14px;font-size:13px;cursor:pointer}
-  .comment button:hover{background:#22344e}
+@layer base {
+  *{ box-sizing:border-box; margin:0; padding:0 }
+  html,body{ height:100% }
+  body{ @apply bg-ink-950 text-paper font-sans text-sm antialiased overflow-hidden }
+  button,input,textarea,select{ font:inherit; color:inherit }
+  ::selection{ background:color-mix(in srgb, var(--color-signal) 26%, transparent) }
+  :focus-visible{ @apply outline-2 outline-offset-2 outline-signal rounded-sm }
+  ::-webkit-scrollbar{ width:8px; height:8px }
+  ::-webkit-scrollbar-thumb{ @apply bg-ink-700 rounded-full }
+  ::-webkit-scrollbar-track{ background:transparent }
+  *{ scrollbar-width:thin; scrollbar-color:var(--color-ink-700) transparent }
+  [hidden]{ display:none !important }
+  @media (prefers-reduced-motion:reduce){ *,*::before,*::after{
+    animation-duration:.01ms !important; transition-duration:.01ms !important } }
+}
 
-  /* ---------- toasts ---------- */
-  #toasts{position:fixed;bottom:18px;right:18px;display:flex;flex-direction:column;gap:8px;z-index:99}
-  .toast{background:#1a1010;border:1px solid rgba(255,97,97,.4);color:#ffb3b3;border-radius:var(--r-sm);
-         padding:9px 14px;font-size:13px;box-shadow:0 8px 24px rgba(0,0,0,.5);animation:in .18s ease-out}
-  .toast.ok{background:#0f1a15;border-color:rgba(62,207,142,.35);color:#a9e8cd}
-  @keyframes in{from{transform:translateY(8px);opacity:0}}
+@layer components {
+  /* ── header ─────────────────────────────────────────────────────────── */
+  .topbar   { @apply flex items-center gap-3 h-14 px-6 bg-ink-900 border-b border-ink-750 shrink-0 }
+  .brand    { @apply flex items-baseline gap-2.5 whitespace-nowrap }
+  .brand b  { @apply text-[15px] font-bold tracking-tight }
+  .brand span{@apply text-mute text-[13px] max-w-[30vw] overflow-hidden text-ellipsis whitespace-nowrap }
+  .search   { @apply flex-[0_1_250px] ml-auto bg-ink-850 border border-ink-700 rounded-full
+                     px-3.5 py-1.5 text-[13px] outline-none placeholder:text-faint
+                     hover:border-ink-600 focus:border-signal transition-colors }
+  .pill     { @apply flex items-center gap-2 px-3 py-1.5 border border-ink-700 rounded-full
+                     text-[12.5px] text-mute bg-ink-850 }
+  .pill i   { @apply w-[7px] h-[7px] rounded-full bg-faint shrink-0 }
+  .pill.working i{ @apply bg-good; box-shadow:0 0 6px color-mix(in srgb,var(--color-good) 70%,transparent) }
+  .pill.idle i   { @apply bg-signal }
+  .pill.gone i   { @apply bg-alert }
+  .conn     { @apply w-2 h-2 rounded-full bg-alert shrink-0 transition-colors duration-300 }
+  .conn.on  { @apply bg-good }
+
+  /* ── board ──────────────────────────────────────────────────────────── */
+  .board    { @apply grid gap-3 h-[calc(100%-3.5rem)] px-6 pt-4 pb-6 overflow-x-auto;
+              grid-template-columns:repeat(5,minmax(238px,1fr)) }
+  .col      { @apply flex flex-col min-w-0 rounded-col bg-ink-900 border border-ink-750 transition-colors }
+  .col.drop { @apply border-signal bg-ink-850 }
+  .col-head { @apply flex items-center gap-2 px-4 pt-3.5 pb-2.5 }
+  .col-head h2{@apply text-[12.5px] font-semibold text-mute }
+  .col-head .n{@apply font-mono text-[11px] text-faint bg-ink-850 border border-ink-700
+                      rounded-full px-2 py-1 }
+  .col-add  { @apply ml-auto w-6 h-6 rounded-full text-faint text-[17px] leading-none
+                     hover:text-paper hover:bg-ink-850 transition-colors cursor-pointer }
+  .col-list { @apply flex-1 overflow-y-auto px-3 pb-3.5 pt-0.5 flex flex-col gap-2 }
+  .empty    { @apply border border-dashed border-ink-700 rounded-card text-faint text-[12.5px]
+                     text-center px-3 py-5 leading-relaxed }
+
+  .card     { @apply relative overflow-hidden bg-ink-850 border border-ink-700 rounded-card
+                     px-3.5 py-3 cursor-grab select-none transition-colors
+                     hover:bg-ink-800 hover:border-ink-600 }
+  .card.blocked{ @apply pl-[18px] }
+  .card.blocked::before{ content:""; @apply absolute left-0 top-1.5 bottom-1.5 w-[3px] rounded-full bg-alert }
+  .card.dragging{ @apply opacity-30 }
+  .card h3  { @apply text-[13.5px] font-medium leading-[1.38] break-words }
+  .card .foot{@apply flex items-center gap-2 mt-2.5 text-xs text-faint }
+  .card .foot .bl{ @apply text-alert font-semibold }
+  .chips    { @apply flex items-center gap-1.5 mb-2 flex-wrap }
+  .chip     { @apply font-mono text-[11px] leading-none text-mute bg-ink-850 border border-ink-700
+                     rounded-full px-2.5 py-1 }
+  .chip.jira{ @apply text-you no-underline hover:border-you transition-colors }
+  .badge    { @apply text-[11px] font-semibold rounded-full px-2.5 py-1 border-0 }
+  .ghost    { @apply fixed z-[99] pointer-events-none w-[230px] opacity-95;
+              transform:rotate(2.5deg); box-shadow:0 14px 36px rgb(0 0 0 / .6) }
+  .newform input{ @apply w-full bg-ink-850 border border-signal rounded-card px-3.5 py-3
+                         text-[13.5px] outline-none }
+
+  /* ── ticket page ────────────────────────────────────────────────────── */
+  .ticket   { @apply fixed inset-0 z-40 bg-ink-950 flex flex-col }
+  .ticket.in{ animation:rise .22s var(--ease-enter) }
+  .t-back   { @apply flex items-center gap-2 text-[13.5px] text-mute px-3 py-1.5 rounded-full
+                     hover:text-paper hover:bg-ink-850 transition-colors cursor-pointer }
+  .t-scroll { @apply flex-1 overflow-y-auto px-6 pt-12 pb-24 }
+  .t-inner  { @apply max-w-[1100px] mx-auto }
+  .t-hero   { @apply flex items-start gap-4 mb-10 }
+  .t-ord    { @apply font-mono font-medium text-[19px] leading-[1.35] text-faint shrink-0 pt-1.5 }
+  .t-title  { @apply flex-1 bg-transparent border border-transparent rounded-field resize-none
+                     overflow-hidden outline-none -ml-2.5 px-2.5 py-1.5
+                     text-[32px] leading-[1.16] font-semibold tracking-[-.02em]
+                     hover:border-ink-700 focus:border-signal focus:bg-ink-850 transition-colors }
+  .t-grid   { @apply grid gap-12; grid-template-columns:minmax(0,1fr) 276px }
+  .t-main   { @apply min-w-0 }
+  .f        { @apply mb-6 }
+  .f label  { @apply block text-[12.5px] font-semibold text-mute mb-2 }
+  .box      { @apply w-full bg-ink-850 border border-ink-700 rounded-field px-4 py-3.5
+                     text-sm leading-relaxed outline-none font-sans text-paper
+                     placeholder:text-faint hover:border-ink-600 focus:border-signal transition-colors }
+  textarea.box{ @apply resize-none overflow-hidden block }
+  .box-desc { @apply min-h-[320px] }
+  .box-crit { @apply min-h-[190px] }
+  select.box{ @apply cursor-pointer pr-9 appearance-none bg-no-repeat;
+              background-image:url('data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" width="10" height="6"><path d="M1 1l4 4 4-4" stroke="%23A29EBB" fill="none" stroke-width="1.5"/></svg>');
+              background-position:right 14px center }
+  .side     { @apply sticky top-0 self-start }
+  .side .f  { @apply mb-4 }
+  .switch   { @apply flex items-center gap-2.5 cursor-pointer text-sm text-mute }
+  .switch input{ @apply w-4 h-4; accent-color:var(--color-alert) }
+  .meta     { @apply grid gap-x-3 gap-y-1.5 text-[12.5px] text-mute border-t border-ink-750 pt-4 mt-6;
+              grid-template-columns:auto 1fr }
+  .meta dt  { @apply text-faint }
+  .meta dd  { @apply [overflow-wrap:anywhere] }
+  .meta dd.path{ @apply font-mono text-[11.5px] text-faint }
+  .danger   { @apply w-full mt-6 px-3.5 py-2.5 rounded-full border border-transparent bg-transparent
+                     text-[13px] text-faint cursor-pointer transition-colors
+                     hover:text-alert hover:border-alert/40 }
+
+  .log      { @apply bg-ink-900 border border-ink-750 rounded-card py-2 max-h-[360px] overflow-y-auto }
+  .log:empty{ @apply hidden }
+  .log-line { @apply flex gap-3 px-4 py-1.5 text-[12.5px] leading-normal hover:bg-ink-850 }
+  .log-line time{ @apply font-mono text-[11px] text-faint pt-0.5 shrink-0 }
+  .t-agent  { @apply text-signal font-semibold }
+  .t-ok     { @apply text-good font-semibold }
+  .t-hot    { @apply text-alert font-semibold }
+  .t-you    { @apply text-you font-semibold }
+  .comment  { @apply flex items-center gap-2 mt-3 flex-wrap }
+  .comment input[type=text]{ @apply flex-1 min-w-[180px] bg-ink-850 border border-ink-700 rounded-full
+                                    px-4 py-2.5 text-[13.5px] outline-none
+                                    hover:border-ink-600 focus:border-signal transition-colors }
+  .comment label{ @apply flex items-center gap-1.5 text-[12.5px] text-mute whitespace-nowrap cursor-pointer }
+  .comment label input{ accent-color:var(--color-signal) }
+  .btn-primary{ @apply bg-signal text-signal-ink border-0 rounded-full px-5 py-2.5
+                       text-[13.5px] font-semibold cursor-pointer transition-[filter]
+                       hover:brightness-110 disabled:opacity-50 disabled:cursor-default }
+
+  /* ── toasts ─────────────────────────────────────────────────────────── */
+  .toasts   { @apply fixed bottom-6 right-6 flex flex-col gap-2 z-[99] }
+  .toast    { @apply rounded-card px-4 py-2.5 text-[13.5px] border;
+              background:color-mix(in srgb,var(--color-alert) 14%,var(--color-ink-950));
+              border-color:color-mix(in srgb,var(--color-alert) 42%,transparent);
+              color:color-mix(in srgb,var(--color-alert) 62%,var(--color-paper));
+              box-shadow:0 10px 28px rgb(0 0 0 / .55); animation:pop .18s ease-out }
+  .toast.ok { background:color-mix(in srgb,var(--color-good) 13%,var(--color-ink-950));
+              border-color:color-mix(in srgb,var(--color-good) 38%,transparent);
+              color:color-mix(in srgb,var(--color-good) 58%,var(--color-paper)) }
+
+  @media (max-width:900px){ .t-grid{ grid-template-columns:1fr; @apply gap-8 } }
+}
+
+@keyframes rise{ from{ transform:translateY(8px); opacity:0 } }
+@keyframes pop { from{ transform:translateY(8px); opacity:0 } }
 </style>
 </head>
 <body>
-<header>
+<header class="topbar">
   <div class="brand"><b>Board</b><span id="plan"></span></div>
-  <input id="search" type="text" placeholder="Filtrer  (T3, jira, texte…)" spellcheck="false">
-  <div id="teams"></div>
-  <div id="conn" title="live"></div>
+  <input id="search" class="search" type="text" placeholder="Filtrer un ticket" spellcheck="false">
+  <div id="teams" class="flex gap-2"></div>
+  <div id="conn" class="conn" title="flux live"></div>
 </header>
-<main id="board"></main>
-<div id="backdrop" hidden><div id="modal"></div></div>
-<div id="toasts"></div>
+<main id="board" class="board"></main>
+<section id="ticket" class="ticket" hidden></section>
+<div id="toasts" class="toasts"></div>
 
 <script>
 "use strict";
-const COLS = [["backlog","Backlog"],["todo","TODO"],["doing","En cours"],["qa","Ready for QA"],["done","Done"]];
-const TEAM_COLORS = {gestion:"var(--amber)", frontend:"var(--cyan)", backend:"var(--violet)", design:"var(--pink)"};
-const HUES = ["#4dd0e1","#a78bfa","#f5b83d","#f06292","#81c784","#ffb74d","#64b5f6"];
+const COLS = [["backlog","Backlog"],["todo","À faire"],["doing","En cours"],
+              ["qa","À vérifier"],["done","Terminé"]];
+const EMPTY = {backlog:"Rien en attente. Ajoute un ticket.", todo:"Rien à lancer.",
+               doing:"Aucun agent au travail.", qa:"Rien à vérifier.", done:"Rien de terminé."};
+const TEAM_COLORS = {gestion:"#C58AF9", frontend:"#63D2E8", backend:"#F58AB0", design:"#B8D96A"};
+const HUES = ["#C58AF9","#63D2E8","#F58AB0","#B8D96A","#E8A87C","#7DD3E8"];
 const $ = s => document.querySelector(s);
 
-let TASKS = new Map();          // id -> task
+let TASKS = new Map();
 let META  = {teams: [], jira_base_url: "", plan_title: ""};
-let open_id = null;             // ticket in the modal
-let drag = null;                // {id, ghost, fromCol}
+let open_id = null;
+let drag = null;
 let renderQueued = false;
 
 /* ---------- utils ---------- */
@@ -203,6 +243,11 @@ async function api(method, path, body){
   if (!r.ok) throw new Error(d.error || `${method} ${path}: ${r.status}`);
   return d;
 }
+function grow(el){ if (!el) return; el.style.height = "auto"; el.style.height = el.scrollHeight + "px"; }
+function badgeStyle(team){
+  const c = teamColor(team);
+  return `color:${c};background:color-mix(in srgb,${c} 14%,transparent)`;
+}
 
 /* ---------- board rendering ---------- */
 function requestRender(){
@@ -225,15 +270,15 @@ function render(){
     const ts = sorted(st).filter(t => !q || matches(t, q));
     return `<section class="col" data-status="${st}">
       <div class="col-head"><h2>${label}</h2><span class="n">${ts.length}</span>
-        ${st === "backlog" ? '<button class="add" title="Nouveau ticket">+</button>' : ""}</div>
-      <div class="col-list">${ts.map(cardHTML).join("") || `<div class="empty">—</div>`}</div>
+        ${st === "backlog" ? '<button class="col-add" title="Nouveau ticket" aria-label="Nouveau ticket">+</button>' : ""}</div>
+      <div class="col-list">${ts.map(cardHTML).join("") || `<div class="empty">${EMPTY[st]}</div>`}</div>
     </section>`;
   }).join("");
   board.querySelectorAll(".card").forEach(el => {
     el.addEventListener("pointerdown", onPointerDown);
-    el.addEventListener("click", () => { if (!el.dataset.moved) openModal(el.dataset.id); });
+    el.addEventListener("click", () => { if (!el.dataset.moved) openTicket(el.dataset.id); });
   });
-  const add = board.querySelector(".add");
+  const add = board.querySelector(".col-add");
   if (add) add.addEventListener("click", showNewForm);
 }
 function matches(t, q){
@@ -246,7 +291,7 @@ function cardHTML(t){
         : `<span class="chip jira">${esc(t.jira)}</span>`)
     : "";
   const team = t.team && t.team !== "-"
-    ? `<span class="badge" style="color:${teamColor(t.team)};background:color-mix(in srgb,${teamColor(t.team)} 13%,transparent)">${esc(t.team)}</span>` : "";
+    ? `<span class="badge" style="${badgeStyle(t.team)}">${esc(t.team)}</span>` : "";
   return `<article class="card${t.blocked ? " blocked" : ""}" data-id="${t.id}">
     <div class="chips"><span class="chip">${t.id}</span>${jira}${team}</div>
     <h3>${esc(t.title)}</h3>
@@ -258,7 +303,7 @@ function showNewForm(){
   if (list.querySelector(".newform")) return list.querySelector(".newform input").focus();
   const f = document.createElement("div");
   f.className = "newform";
-  f.innerHTML = `<input type="text" placeholder="Titre du ticket… (Entrée)" spellcheck="false">`;
+  f.innerHTML = `<input type="text" placeholder="Sujet du ticket, puis Entrée" spellcheck="false">`;
   list.prepend(f);
   const inp = f.querySelector("input");
   inp.focus();
@@ -295,6 +340,7 @@ function onPointerDown(e){
 }
 function startDrag(card, ev){
   const ghost = card.cloneNode(true);
+  ghost.classList.add("ghost");
   ghost.id = "ghost";
   ghost.style.width = card.offsetWidth + "px";
   document.body.appendChild(ghost);
@@ -319,88 +365,115 @@ async function endDrag(){
   const t = TASKS.get(id);
   if (!over || !t || t.status === over) { render(); return; }
   const prev = t.status;
-  t.status = over; render();                        // optimiste
+  t.status = over; render();
   try {
     const fresh = await api("PATCH", `/api/tasks/${id}`, {status: over});
     TASKS.set(id, fresh); requestRender();
-    if (over === "todo") toast(`${id} → TODO, gestion notifiée`, true);
+    if (over === "todo") toast(`${id} → À faire — gestion notifiée`, true);
   } catch (err) {
     t.status = prev; render();
-    toast(`${id}: ${err.message}`);
+    toast(`${id} : ${err.message}`);
   }
 }
 
-/* ---------- modal ---------- */
-function openModal(id){
+/* ---------- ticket page ---------- */
+function openTicket(id){
+  if (location.hash !== "#" + id) { location.hash = id; return; }
+  showTicket(id);
+}
+function showTicket(id){
+  if (!TASKS.has(id)) return closeTicket();
   open_id = id;
-  renderModal(true);
-  $("#backdrop").hidden = false;
+  renderTicket(true);
+  const el = $("#ticket");
+  el.hidden = false;
+  el.classList.remove("in"); void el.offsetWidth; el.classList.add("in");
 }
-function closeModal(){
-  $("#backdrop").hidden = true;
+function closeTicket(){
+  $("#ticket").hidden = true;
   open_id = null;
+  if (location.hash) history.pushState("", "", location.pathname + location.search);
 }
-function renderModal(full){
+function renderTicket(full){
   const t = TASKS.get(open_id);
-  if (!t) return closeModal();
-  const M = $("#modal");
+  if (!t) return closeTicket();
+  const T = $("#ticket");
   if (full){
-    M.innerHTML = `
-      <div class="m-top">
+    T.innerHTML = `
+      <div class="topbar">
+        <button class="t-back" id="t-back">← Board</button>
         <span class="chip">${t.id}</span>
-        <span class="badge" id="m-teambadge"></span>
-        <button class="close" title="Fermer (Esc)">×</button>
+        <span class="badge" id="t-teambadge"></span>
+        <span class="ml-auto"></span>
+        <select id="t-status" class="box w-auto min-w-[152px] py-2" aria-label="Statut">
+          ${COLS.map(([s,l]) => `<option value="${s}">${l}</option>`).join("")}
+        </select>
       </div>
-      <input id="m-title" spellcheck="false">
-      <div class="m-grid">
-        <div>
-          <div class="f"><label>Description</label><textarea id="m-desc" rows="4" placeholder="Contexte, but…"></textarea></div>
-          <div class="f"><label>Criteria</label><textarea id="m-crit" rows="3" placeholder="- build green&#10;- …"></textarea></div>
-          <div class="f"><label>Log</label><div id="m-log"></div>
-            <div class="comment">
-              <input type="text" id="m-comment" placeholder="Note pour le ticket…" spellcheck="false">
-              <label><input type="checkbox" id="m-notify"> notifier gestion</label>
-              <button id="m-send">Ajouter</button>
-            </div></div>
+      <div class="t-scroll"><div class="t-inner">
+        <div class="t-hero">
+          <span class="t-ord">${t.id}</span>
+          <textarea id="t-title" class="t-title" rows="1" spellcheck="false" aria-label="Titre du ticket"></textarea>
         </div>
-        <div class="side">
-          <div class="f"><label>Statut</label><select id="m-status">${COLS.map(([s,l]) => `<option value="${s}">${l}</option>`).join("")}</select></div>
-          <div class="f"><label>Team</label><select id="m-team"><option value="-">—</option>${META.teams.filter(x => !x.primary).map(x => `<option>${esc(x.name)}</option>`).join("")}</select></div>
-          <div class="f"><label>Jira</label><input type="text" id="m-jira" placeholder="LUM-482" spellcheck="false"></div>
-          <div class="f"><label class="switch" style="text-transform:none;letter-spacing:0"><input type="checkbox" id="m-blocked"> <span>Bloqué</span></label></div>
-          <div class="f meta" id="m-meta"></div>
-          <button class="danger" id="m-del">Supprimer le ticket</button>
+        <div class="t-grid">
+          <div class="t-main">
+            <div class="f"><label for="t-desc">Description</label>
+              <textarea id="t-desc" class="box box-desc" placeholder="Ce qui a été décidé, ce qui a été écarté, et où vit le détail."></textarea></div>
+            <div class="f"><label for="t-crit">Critères de vérification</label>
+              <textarea id="t-crit" class="box box-crit" placeholder="Les commandes qui disent que c'est fait, mot pour mot."></textarea></div>
+            <div class="f"><label>Journal</label><div id="t-log" class="log"></div>
+              <div class="comment">
+                <input type="text" id="t-comment" placeholder="Ajouter une note au ticket" spellcheck="false">
+                <label><input type="checkbox" id="t-notify"> notifier gestion</label>
+                <button id="t-send" class="btn-primary">Ajouter la note</button>
+              </div></div>
+          </div>
+          <div class="side">
+            <div class="f"><label for="t-team">Team</label>
+              <select id="t-team" class="box">${'<option value="-">Aucune</option>'}${META.teams.filter(x => !x.primary).map(x => `<option>${esc(x.name)}</option>`).join("")}</select></div>
+            <div class="f"><label for="t-jira">Jira</label>
+              <input type="text" class="box" id="t-jira" placeholder="LUM-482" spellcheck="false"></div>
+            <div class="f"><label class="switch"><input type="checkbox" id="t-blocked"> <span>Bloqué</span></label></div>
+            <dl class="meta" id="t-meta"></dl>
+            <button class="danger" id="t-del">Supprimer le ticket</button>
+          </div>
         </div>
-      </div>`;
-    M.querySelector(".close").onclick = closeModal;
-    bindField("#m-title", "title", v => v.trim() || null);
-    bindField("#m-desc", "description");
-    bindField("#m-crit", "criteria");
-    bindField("#m-jira", "jira", v => v.trim());
-    $("#m-status").onchange = e => patch({status: e.target.value});
-    $("#m-team").onchange = e => patch({team: e.target.value});
-    $("#m-blocked").onchange = e => patch({blocked: e.target.checked});
-    $("#m-send").onclick = sendComment;
-    $("#m-comment").addEventListener("keydown", e => { if (e.key === "Enter") sendComment(); });
-    $("#m-del").onclick = async () => {
+      </div></div>`;
+    $("#t-back").onclick = closeTicket;
+    bindField("#t-title", "title", v => v.replace(/\s+/g, " ").trim() || null);
+    bindField("#t-desc", "description");
+    bindField("#t-crit", "criteria");
+    bindField("#t-jira", "jira", v => v.trim());
+    $("#t-status").onchange = e => patch({status: e.target.value});
+    $("#t-team").onchange = e => patch({team: e.target.value});
+    $("#t-blocked").onchange = e => patch({blocked: e.target.checked});
+    $("#t-send").onclick = sendComment;
+    $("#t-comment").addEventListener("keydown", e => { if (e.key === "Enter") sendComment(); });
+    ["#t-title","#t-desc","#t-crit"].forEach(sel =>
+      $(sel).addEventListener("input", e => grow(e.target)));
+    $("#t-title").addEventListener("keydown", e => {
+      if (e.key === "Enter"){ e.preventDefault(); e.target.blur(); }
+    });
+    $("#t-del").onclick = async () => {
       if (!confirm(`Supprimer ${t.id} ?`)) return;
-      try { await api("DELETE", `/api/tasks/${t.id}`); TASKS.delete(t.id); closeModal(); render(); }
+      try { await api("DELETE", `/api/tasks/${t.id}`); TASKS.delete(t.id); closeTicket(); render(); }
       catch (err) { toast(err.message); }
     };
   }
-  // values — never clobber the field being edited
-  setVal("#m-title", t.title); setVal("#m-desc", t.description); setVal("#m-crit", t.criteria);
-  setVal("#m-status", t.status); setVal("#m-team", t.team); setVal("#m-jira", t.jira);
-  const bl = $("#m-blocked"); if (document.activeElement !== bl) bl.checked = t.blocked;
-  const badge = $("#m-teambadge");
+  setVal("#t-title", t.title); setVal("#t-desc", t.description); setVal("#t-crit", t.criteria);
+  setVal("#t-status", t.status); setVal("#t-team", t.team); setVal("#t-jira", t.jira);
+  ["#t-title","#t-desc","#t-crit"].forEach(sel => grow($(sel)));
+  const bl = $("#t-blocked"); if (document.activeElement !== bl) bl.checked = t.blocked;
+  const badge = $("#t-teambadge");
   if (t.team && t.team !== "-"){
-    badge.style.display = ""; badge.textContent = t.team;
-    badge.style.color = teamColor(t.team);
-    badge.style.background = `color-mix(in srgb,${teamColor(t.team)} 13%,transparent)`;
-  } else badge.style.display = "none";
-  $("#m-meta").innerHTML = `créé ${esc(rel(t.created))} · maj ${esc(rel(t.updated))} · par ${esc(t.by || "?")}`
-    + `<br>shared/tasks/${t.id}.md`;
-  const log = $("#m-log"), atEnd = log.scrollTop + log.clientHeight >= log.scrollHeight - 8;
+    badge.hidden = false; badge.textContent = t.team;
+    badge.className = "badge"; badge.setAttribute("style", badgeStyle(t.team));
+  } else badge.hidden = true;
+  $("#t-meta").innerHTML =
+      `<dt>Créé</dt><dd>${esc(rel(t.created))}</dd>`
+    + `<dt>Modifié</dt><dd>${esc(rel(t.updated))}</dd>`
+    + `<dt>Par</dt><dd>${esc(t.by || "inconnu")}</dd>`
+    + `<dt>Fichier</dt><dd class="path">shared/tasks/${t.id}.md</dd>`;
+  const log = $("#t-log"), atEnd = log.scrollTop + log.clientHeight >= log.scrollHeight - 8;
   log.innerHTML = t.log.map(logHTML).join("");
   if (atEnd || full) log.scrollTop = log.scrollHeight;
 }
@@ -408,12 +481,14 @@ function setVal(sel, v){
   const el = $(sel);
   if (el && document.activeElement !== el && el.value !== String(v ?? "")) el.value = v ?? "";
 }
+const MARKER = {TASK:"t-agent", ASK:"t-agent", CONTRACT:"t-agent", NEW:"t-agent",
+                DONE:"t-ok", ANSWER:"t-ok", BLOCKED:"t-hot", COMMENT:"t-you"};
 function logHTML(line){
   const m = line.match(/^(\d\d:\d\d:\d\d)\s+(.*)$/);
   const time = m ? m[1] : "", rest = m ? m[2] : line;
   const marked = esc(rest)
-    .replace(/\b(TASK|DONE|BLOCKED|ASK|ANSWER|CONTRACT|NEW|COMMENT)\b/, w => `<span class="t-${w === "DONE" ? "DONE" : w === "BLOCKED" ? "BLOCKED" : "TASK"}">${w}</span>`)
-    .replace(/^human:/, `<span class="t-human">human:</span>`);
+    .replace(/\b(TASK|DONE|BLOCKED|ASK|ANSWER|CONTRACT|NEW|COMMENT)\b/, w => `<span class="${MARKER[w]}">${w}</span>`)
+    .replace(/^human:/, `<span class="t-you">human:</span>`);
   return `<div class="log-line"><time>${time}</time><span>${marked}</span></div>`;
 }
 function bindField(sel, key, clean){
@@ -422,7 +497,7 @@ function bindField(sel, key, clean){
     const t = TASKS.get(open_id);
     if (!t) return;
     let v = clean ? clean(el.value) : el.value;
-    if (v === null) { el.value = t[key]; return; }
+    if (v === null) { el.value = t[key]; grow(el); return; }
     if (v !== (t[key] ?? "")) patch({[key]: v});
   });
   if (el.tagName === "INPUT")
@@ -433,29 +508,36 @@ async function patch(changes){
   try {
     const t = await api("PATCH", `/api/tasks/${id}`, changes);
     TASKS.set(id, t);
-    if (open_id === id) renderModal(false);
+    if (open_id === id) renderTicket(false);
     requestRender();
   } catch (err) { toast(err.message); }
 }
 async function sendComment(){
-  const inp = $("#m-comment"), text = inp.value.trim();
+  const inp = $("#t-comment"), btn = $("#t-send"), text = inp.value.trim();
   if (!text) return;
-  inp.disabled = true;
+  inp.disabled = btn.disabled = true;
   try {
-    const t = await api("POST", `/api/tasks/${open_id}/comment`, {text, notify: $("#m-notify").checked});
-    TASKS.set(open_id, t); inp.value = ""; renderModal(false); requestRender();
+    const t = await api("POST", `/api/tasks/${open_id}/comment`, {text, notify: $("#t-notify").checked});
+    TASKS.set(open_id, t); inp.value = ""; renderTicket(false); requestRender();
   } catch (err) { toast(err.message); }
-  inp.disabled = false; inp.focus();
+  inp.disabled = btn.disabled = false; inp.focus();
 }
-$("#backdrop").addEventListener("mousedown", e => { if (e.target === e.currentTarget) closeModal(); });
-window.addEventListener("keydown", e => { if (e.key === "Escape" && open_id) closeModal(); });
+
+/* ---------- routing ---------- */
+function route(){
+  const id = location.hash.replace(/^#/, "");
+  if (id && TASKS.has(id)) showTicket(id);
+  else { $("#ticket").hidden = true; open_id = null; }
+}
+window.addEventListener("hashchange", route);
+window.addEventListener("keydown", e => { if (e.key === "Escape" && open_id) closeTicket(); });
 
 /* ---------- header / state ---------- */
 function renderHeader(){
   $("#plan").textContent = META.plan_title || "";
   document.title = (META.plan_title ? META.plan_title + " — " : "") + "Board";
   $("#teams").innerHTML = META.teams.map(t =>
-    `<div class="pill ${esc(t.status)}" title="${esc(t.purpose)} — ${esc(t.status)}${t.updated ? " (" + esc(rel(t.updated)) + ")" : ""}">
+    `<div class="pill ${esc(t.status)}" title="${esc(t.purpose)} — ${esc(t.status)}${t.updated ? ", vu " + esc(rel(t.updated)) : ""}">
        <i></i>${esc(t.title || t.name)}</div>`).join("");
 }
 
@@ -465,7 +547,8 @@ async function resync(){
   TASKS = new Map(tasks.map(t => [t.id, t]));
   META = state;
   renderHeader(); render();
-  if (open_id) TASKS.has(open_id) ? renderModal(false) : closeModal();
+  if (open_id) TASKS.has(open_id) ? renderTicket(false) : closeTicket();
+  else route();
 }
 function connect(){
   const es = new EventSource("/events");
@@ -475,18 +558,18 @@ function connect(){
     const t = JSON.parse(e.data);
     TASKS.set(t.id, t);
     requestRender();
-    if (open_id === t.id) renderModal(false);
+    if (open_id === t.id) renderTicket(false);
   });
   es.addEventListener("task-deleted", e => {
     const {id} = JSON.parse(e.data);
     TASKS.delete(id);
     requestRender();
-    if (open_id === id) closeModal();
+    if (open_id === id) closeTicket();
   });
   es.addEventListener("state", e => { META = JSON.parse(e.data); renderHeader(); });
 }
 $("#search").addEventListener("input", () => render());
-setInterval(() => { if (!drag) requestRender(); }, 30_000);   // relative times
+setInterval(() => { if (!drag) requestRender(); }, 30_000);
 resync().then(connect).catch(err => { toast("Serveur injoignable : " + err.message); connect(); });
 </script>
 </body>
