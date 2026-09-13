@@ -1,6 +1,6 @@
 {
   "$doc": [
-    "Config des teams. Chaque team = 1 workspace programa nommé `title`, 1 lead Claude (Fable 5) + des workers.",
+    "Config des teams. Chaque team = 1 workspace programa nommé `title`, 1 lead Claude (Fable 5.1) + des workers.",
     "permission_mode: yolo (= --dangerously-skip-permissions) | acceptEdits | default | plan.",
     "WORKERS — catalogue dans defaults.workers, clé = nom du fichier agents/<nom>.md.",
     "  Entrée = { model, description?, vars?, file? }  ou  \"<model>\" (raccourci)  ou  false (retire ce worker pour la team).",
@@ -20,7 +20,7 @@
   },
   "permission_mode": "yolo",
   "defaults": {
-    "model": "claude-fable-5",
+    "model": "claude-fable-5-1",
     "add_dirs": [],
     "workers": {
       "worker-simple": {
