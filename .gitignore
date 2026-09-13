@@ -1,11 +1,10 @@
 __pycache__/
+.DS_Store
+# never version runtime state, wherever an instance lives
 .state/
-rules/*.local.md
-shared/.roster.json
-shared/LOG.md
-shared/tasks/*
-!shared/tasks/.gitkeep
-rules/*.md
-!rules/.gitkeep
-shared/PLAN.md
-shared/CONTRACTS.md
+# demo apps: dependencies and build output
+examples/demo/**/node_modules/
+examples/demo/**/.venv/
+examples/demo/**/dist/
+examples/demo/**/.pytest_cache/
+examples/demo/sample-backend/data.db

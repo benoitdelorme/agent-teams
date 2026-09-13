@@ -1,16 +1,16 @@
 """tasklib — file-backed tickets in SHARED_DIR/tasks/, shared by `teams`, the board server and the hooks.
 
 One ticket = one markdown file `T<n>.md`: a flat frontmatter (single-line values) and a body
-made of `## <Section>` blocks. `## Log` is append-only and kept last. All writes are atomic
-(tmp + os.replace); ids come from `.counter` under an exclusive flock, so the web UI and
-gestion (via `teams task new`) share one collision-free sequence.
+made of `## <Section>` blocks. All read/modify/write operations take the same local
+lock; replacement is atomic. CLI, hooks and board share validation and history.
 """
-import os, re, tempfile
+import re
+import storage
 from datetime import datetime
 from pathlib import Path
 
 STATUSES = ["backlog", "todo", "doing", "qa", "done"]
-META_KEYS = ["id", "title", "team", "status", "blocked", "jira", "created", "updated", "by"]
+META_KEYS = ["id", "title", "team", "status", "blocked", "ref", "created", "updated", "by"]
 _ID = re.compile(r"^T\d+$")
 
 
@@ -24,38 +24,23 @@ def tasks_dir(shared: Path) -> Path:
     return d
 
 
-def _atomic_write(path: Path, text: str):
-    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.")
-    try:
-        with os.fdopen(fd, "w") as fh:
-            fh.write(text)
-        os.replace(tmp, path)
-    except BaseException:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
+_atomic_write = storage.atomic_write
+
+
+def lock(shared):
+    return storage.locked(Path(shared) / ".locks" / "tasks.lock")
 
 
 def alloc_id(shared: Path) -> str:
-    """Next T<n>, atomic across processes (flock), never colliding with an existing file."""
-    import fcntl
+    """Called while holding the shared task lock."""
     d = tasks_dir(shared)
-    with open(d / ".counter", "a+") as fh:
-        fcntl.flock(fh, fcntl.LOCK_EX)
-        fh.seek(0)
-        raw = fh.read().strip()
-        n = int(raw) if raw.isdigit() else 0
+    counter = d / '.counter'
+    n = int(counter.read_text() or '0') if counter.exists() else 0
+    n += 1
+    while (d / f'T{n}.md').exists():
         n += 1
-        while (d / f"T{n}.md").exists():
-            n += 1
-        fh.seek(0)
-        fh.truncate()
-        fh.write(str(n))
-        fh.flush()
-        os.fsync(fh.fileno())
-    return f"T{n}"
+    _atomic_write(counter, str(n))
+    return f'T{n}'
 
 
 # ---------- parse / serialize ------------------------------------------------
@@ -74,11 +59,11 @@ def parse(path: Path) -> tuple[dict, str]:
             if sep:
                 meta[k.strip()] = v.strip()
     meta.setdefault("id", Path(path).stem)
-    meta.setdefault("title", "(sans titre)")
+    meta.setdefault("title", "(untitled)")
     meta.setdefault("team", "-")
     meta["status"] = meta.get("status") if meta.get("status") in STATUSES else "backlog"
     meta["blocked"] = str(meta.get("blocked", "")).lower() == "true"
-    meta.setdefault("jira", "")
+    meta.setdefault("ref", meta.pop("jira", ""))      # `jira:` in older tickets is read as `ref`
     meta.setdefault("created", "")
     meta.setdefault("updated", "")
     meta.setdefault("by", "")
@@ -91,7 +76,7 @@ def serialize(meta: dict, body: str) -> str:
         v = meta.get(k, "")
         if k == "blocked":
             v = "true" if v else "false"
-        if k == "jira" and not v:
+        if k == "ref" and not v:
             continue
         lines.append(f"{k}: {_clean(v)}")
     for k, v in meta.items():                 # unknown keys (github:, linear:, …) survive round-trips
@@ -166,8 +151,8 @@ def load_all(shared: Path) -> list[dict]:
             meta, body = parse(p)
             out.append(to_dict(meta, body))
         except (OSError, ValueError):
-            out.append({"id": p.stem, "title": f"⚠ fichier illisible ({p.name})", "team": "-", "status": "backlog",
-                        "blocked": False, "jira": "", "created": "", "updated": "", "by": "",
+            out.append({"id": p.stem, "title": f"⚠ unreadable file ({p.name})", "team": "-", "status": "backlog",
+                        "blocked": False, "ref": "", "created": "", "updated": "", "by": "",
                         "description": "", "criteria": "", "log": [], "broken": True})
     return out
 
@@ -176,88 +161,165 @@ def to_dict(meta: dict, body: str) -> dict:
     return {**meta,
             "description": get_section(body, "Description"),
             "criteria": get_section(body, "Criteria"),
+            "scope": get_section(body, "Scope"),
+            "verify": get_section(body, "Verify"),
+            "decisions": get_section(body, "Decisions"),
+            "depends": get_section(body, "Depends"),
             "log": log_entries(body)}
 
 
-def create(shared: Path, title: str, *, team: str = "-", status: str = "backlog", jira: str = "",
-           description: str = "", criteria: str = "", by: str = "human") -> dict:
-    if status not in STATUSES:
-        raise ValueError(f"bad status: {status}")
-    tid = alloc_id(shared)
-    meta = {"id": tid, "title": _clean(title) or "(sans titre)", "team": _clean(team) or "-", "status": status,
-            "blocked": False, "jira": _clean(jira), "created": now(), "updated": now(), "by": by}
-    body = ""
-    if description.strip():
-        body = set_section(body, "Description", description)
-    if criteria.strip():
-        body = set_section(body, "Criteria", criteria)
-    body = set_section(body, "Log", f"- {datetime.now():%H:%M:%S} created by {by} ({status})")
-    _atomic_write(path_of(shared, tid), serialize(meta, body))
+EDITABLE = {"title", "team", "status", "blocked", "ref", "description", "criteria",
+            "scope", "verify", "decisions", "depends"}
+SECTIONS = {"description", "criteria", "scope", "verify", "decisions", "depends"}
+TRANSITIONS = {"backlog": {"todo"}, "todo": {"backlog", "doing"},
+               "doing": {"todo", "qa"}, "qa": {"doing", "done"}, "done": {"todo"}}
+MESSAGE = re.compile(r"^(TASK|DONE|BLOCKED|ASK|ANSWER|CONTRACT|STATUS) (-|T[0-9]+(?:,T[0-9]+)*) \| (.+)$")
+
+
+def _manager(actor, primary):
+    if actor not in ("human", primary):
+        raise ValueError("only the human or primary team may change a ticket")
+
+
+def _note(body, text):
+    return set_section(body, "Log", (get_section(body, "Log") +
+                       f"\n- {now()} {_clean(text)}").strip())
+
+
+def _save(shared, meta, body):
+    meta["updated"] = now()
+    _atomic_write(path_of(shared, meta["id"]), serialize(meta, body))
     return to_dict(meta, body)
 
 
-def update(shared: Path, tid: str, changes: dict) -> dict:
-    """Apply meta changes (title/team/status/blocked/jira/…) and description/criteria rewrites."""
-    p = path_of(shared, tid)
-    meta, body = parse(p)
-    for k, v in changes.items():
-        if k in ("description", "criteria"):
-            body = set_section(body, k.capitalize(), str(v))
-        elif k == "blocked":
-            meta[k] = v if isinstance(v, bool) else str(v).lower() == "true"
-        elif k == "status":
-            if v not in STATUSES:
-                raise ValueError(f"bad status: {v}")
-            meta[k] = v
-        elif k == "id":
-            continue
+def _changes(meta, body, changes, actor, primary, teams=None):
+    _manager(actor, primary)
+    unknown = set(changes) - EDITABLE
+    if unknown:
+        raise ValueError(f"unknown fields: {sorted(unknown)}")
+    if "team" in changes and teams is not None and changes["team"] not in {*teams, "-"}:
+        raise ValueError(f"unknown team {changes['team']!r} (expected one of {', '.join(teams)} or -)")
+    target = changes.get("status", meta["status"])
+    if target != meta["status"] and target not in TRANSITIONS[meta["status"]]:
+        raise ValueError(f"invalid transition {meta['status']} -> {target}")
+    previous = dict(meta)
+    for key, value in changes.items():
+        if key in SECTIONS:
+            body = set_section(body, key.capitalize(), str(value))
+        elif key == "blocked":
+            meta[key] = value if isinstance(value, bool) else str(value).lower() == "true"
         else:
-            meta[k] = _clean(v)
-    meta["updated"] = now()
-    _atomic_write(p, serialize(meta, body))
-    return to_dict(meta, body)
+            meta[key] = _clean(value)
+    events = [f'{key} {previous.get(key)} → {meta.get(key)}' for key in ('status', 'team', 'blocked')
+              if previous.get(key) != meta.get(key)]
+    return meta, _note(body, f"{actor}: {'; '.join(events)}") if events else body
 
 
-def append_log(shared: Path, tid: str, text: str) -> dict:
-    p = path_of(shared, tid)
-    meta, body = parse(p)
-    log = get_section(body, "Log")
-    entry = f"- {datetime.now():%H:%M:%S} {_clean(text)}"
-    body = set_section(body, "Log", (log + "\n" + entry).strip())
-    meta["updated"] = now()
-    _atomic_write(p, serialize(meta, body))
-    return to_dict(meta, body)
+def create(shared: Path, title: str, *, team="-", status="backlog", ref="",
+           description="", criteria="", by="human", primary="manager", teams=None, **mandate) -> dict:
+    _manager(by, primary)
+    if status not in ("backlog", "todo"):
+        raise ValueError("new tickets start in backlog or todo")
+    if teams is not None and team not in {*teams, "-"}:
+        raise ValueError(f"unknown team {team!r} (expected one of {', '.join(teams)} or -)")
+    with lock(shared):
+        tid = alloc_id(shared)
+        meta = {"id": tid, "title": _clean(title) or "(untitled)", "team": team,
+                "status": status, "blocked": False, "ref": ref, "created": now(), "by": by}
+        body = ""
+        for key, value in {"description": description, "criteria": criteria, **mandate}.items():
+            if key not in SECTIONS:
+                raise ValueError(f"unknown mandate field {key}")
+            body = set_section(body, key.capitalize(), str(value))
+        return _save(shared, meta, _note(body, f"created by {by} ({status})"))
 
 
-def delete(shared: Path, tid: str):
-    path_of(shared, tid).unlink(missing_ok=True)
+def update(shared, tid, changes, *, actor="human", primary="manager", teams=None):
+    with lock(shared):
+        meta, body = parse(path_of(shared, tid))
+        previous = serialize(meta, body)
+        meta, body = _changes(meta, body, changes, actor, primary, teams)
+        if serialize(meta, body) == previous:
+            return to_dict(meta, body)
+        return _save(shared, meta, body)
 
 
-def apply_message(shared: Path, sender: str, to: str, header: str) -> list[str]:
-    """Mirror one inter-team message (`TYPE T3[,T4] | what`) into the tickets it references.
 
-    Called by the SendMessage hook — costs no tokens. Rules:
-      TASK    → status doing (from backlog/todo), team = recipient
-      DONE    → status qa (from doing), blocked cleared
-      BLOCKED → blocked flag set
-    Every match also gets the header appended to its ## Log. Returns touched ids.
-    """
-    m = re.match(r"\s*([A-Z]+)\b", header)
-    typ = m.group(1) if m else ""
-    touched = []
-    for tid in dict.fromkeys(re.findall(r"\bT\d+\b", header)):
-        if not path_of(shared, tid).exists():
+
+
+def append_log(shared, tid, text, *, actor="human", primary="manager"):
+    with lock(shared):
+        meta, body = parse(path_of(shared, tid))
+        if actor not in ("human", primary, meta["team"]):
+            raise ValueError("notes require the owner, primary team or human")
+        return _save(shared, meta, _note(body, text))
+
+
+def delete(shared, tid, *, actor="human"):
+    if actor != "human":
+        raise ValueError("only the human may delete a ticket")
+    with lock(shared):
+        path_of(shared, tid).unlink(missing_ok=True)
+
+
+def message_parts(header):
+    match = MESSAGE.fullmatch(header.strip())
+    if not match:
+        raise ValueError("expected TYPE T1[,T2] | summary (or - instead of ticket ids)")
+    typ, refs, _ = match.groups()
+    return typ, [] if refs == "-" else list(dict.fromkeys(refs.split(",")))
+
+
+def canonical_team(name, teams, prefix=""):
+    if name in teams:
+        return name
+    candidate = name[len(prefix) + 1:] if prefix and name.startswith(prefix + "-") else name
+    if candidate not in teams:
+        raise ValueError(f"unknown team recipient {name!r}")
+    return candidate
+
+
+def _message_records(shared, sender, to, header, primary, event_id):
+    typ, ids = message_parts(header)
+    marker = f"<!-- event:{event_id} -->" if event_id else ""
+    if event_id and not re.fullmatch(r"[a-zA-Z0-9_.:-]+", event_id):
+        raise ValueError("invalid event id")
+    records = []
+    for tid in ids:
+        meta, body = parse(path_of(shared, tid))
+        if marker and marker in body:
             continue
-        append_log(shared, tid, f"{sender} → {to} | {header.strip()}")
-        cur = load(shared, tid)
-        if typ == "TASK" and cur["status"] in ("backlog", "todo"):
-            update(shared, tid, {"status": "doing", "team": to})
-        elif typ == "DONE":
-            update(shared, tid, {"blocked": False, **({"status": "qa"} if cur["status"] == "doing" else {})})
-        elif typ == "BLOCKED":
-            update(shared, tid, {"blocked": True})
-        touched.append(tid)
-    return touched
+        if typ == "TASK":
+            if sender != primary or to == primary:
+                raise ValueError("TASK must be sent by the primary team to an execution team")
+            if meta["status"] not in ("todo", "doing") or meta["team"] not in ("-", to):
+                raise ValueError(f"{tid} is not ready for {to}; backlog is human-owned")
+            if not get_section(body, "Criteria").strip():
+                raise ValueError(f"{tid} needs acceptance criteria before dispatch")
+            meta.update(status="doing", team=to, blocked=False)
+        elif typ in ("DONE", "BLOCKED"):
+            if to != primary or sender != meta["team"]:
+                raise ValueError(f"{typ} must come from {tid}'s owner to the primary team")
+            if meta["status"] not in ("doing", "qa"):
+                raise ValueError(f"{tid} is not active")
+            meta["blocked"] = typ == "BLOCKED"
+            if typ == "DONE":
+                meta["status"] = "qa"
+        body = _note(body, f"{sender} → {to} | {header.strip()}")
+        if marker:
+            body += "\n" + marker + "\n"
+        records.append((meta, body))
+    return records
+
+
+def apply_message(shared, sender, to, header, *, primary="manager", event_id=None, validate_only=False):
+    """Only the reference field changes tickets. Successful tool events are replay-safe."""
+    with lock(shared):
+        records = _message_records(shared, sender, to, header, primary, event_id)
+        if not validate_only:
+            for meta, body in records:
+                _save(shared, meta, body)
+        return [meta["id"] for meta, _ in records]
 
 
 def summary(shared: Path) -> str:
@@ -270,6 +332,6 @@ def summary(shared: Path) -> str:
         by[t["status"]] = by.get(t["status"], 0) + 1
     head = "tasks: " + ", ".join(f"{by[s]} {s}" for s in STATUSES if s in by)
     rows = [f"{t['id']:4} [{t['team']}] {t['status']:7}{' ⛔' if t['blocked'] else '  '} {t['title'][:56]}"
-            + (f"  ({t['jira']})" if t["jira"] else "")
+            + (f"  ({t['ref']})" if t["ref"] else "")
             for t in ts if t["status"] != "done"]
     return head + ("\n  " + "\n  ".join(rows) if rows else "")

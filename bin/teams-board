@@ -3,11 +3,11 @@
 
 Zero dependency (stdlib only). The files are the source of truth: this server is a view
 plus a pen. It watches mtimes (2×/s) and pushes SSE; UI writes go through the same
-tasklib the CLI and hooks use. Moving a ticket to `todo` from the UI wakes gestion by
-typing one line into its terminal via `programa send` (same channel as `teams msg`).
+tasklib the CLI and hooks use. Moving a ticket to `todo` from the UI queues a notification
+for the manager, delivered by typing one line into its terminal (see bin/terminal.py).
 
-Started by `teams up` (detached, port picked by the OS, url in .state/board.json) or
-standalone: `bin/teams-board --root <teams dir>`.
+Started by `teams up` (port picked by the OS, url in <instance>/.state/board.json) or
+standalone: `bin/teams-board --root <instance dir>`.
 """
 import argparse, json, os, re, signal, subprocess, sys, threading, time, queue
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -15,13 +15,16 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import tasklib
+import storage
+import terminal
+import uuid
 
 CTX = {}          # root, shared, cfg, url — filled in main()
 
 
 # ---------- config / state ---------------------------------------------------
-def load_ctx(root: Path):
-    cfg = json.loads((root / "teams.json").read_text())
+def load_ctx(root: Path, config=None):
+    cfg = json.loads((config or root / "teams.json").read_text())
     shared = (root / cfg.get("shared_dir", "shared")).resolve()
     primary = next((t["name"] for t in cfg.get("teams", []) if t.get("primary")), None)
     CTX.update(root=root, cfg=cfg, shared=shared, primary=primary,
@@ -56,54 +59,65 @@ def plan_title() -> str:
 
 
 def api_state() -> dict:
-    return {"plan_title": plan_title(), "url": CTX.get("url", ""),
-            "jira_base_url": CTX["board"].get("jira_base_url", ""),
-            "teams": sessions_state(), "statuses": tasklib.STATUSES}
+    return {"plan_title": plan_title(),
+            "ref_base_url": CTX["board"].get("ref_base_url", ""),
+            "shared_dir": CTX["cfg"].get("shared_dir", "shared"),
+            "teams": sessions_state(),
+            "notify_available": notification_available(),
+            "pending_notifications": len(storage.read_json(CTX["state"] / "notifications.json", [])),
+            "transitions": {key: [s for s in tasklib.STATUSES if s in values]
+                            for key, values in tasklib.TRANSITIONS.items()}}
 
 
-# ---------- wake gestion ------------------------------------------------------
-PENDING = []              # notifications that failed to send; the watcher retries them
-PENDING_LOCK = threading.Lock()
-
-
-def _send_gestion(text: str) -> bool:
-    if not CTX["primary"]:
-        return True                              # nowhere to send — don't queue forever
+# ---------- wake the manager (primary team) ------------------------------------------------------
+def _primary_terminal():
+    """(driver, handle) of the manager's terminal as recorded by `teams up`, or (None, None)."""
+    st = storage.read_json(CTX['state'] / 'terminal.json')
+    h = st.get('handles', {}).get(CTX['primary'])
+    if not h or not st.get('driver'):
+        return None, None
     try:
-        st = json.loads((CTX["state"] / "surfaces.json").read_text())
-        ws = st["workspaces"][CTX["primary"]]
-        surf = st["surfaces"][CTX["primary"]]
-    except (OSError, KeyError, json.JSONDecodeError):
-        return True                              # teams not up — drop silently (board works standalone)
-    r = subprocess.run(["programa", "send", "--workspace", ws, "--surface", surf, text + "\n"],
-                       capture_output=True, text=True)
-    if r.returncode != 0:
-        print(f"notify failed (will retry): {r.stderr.strip()[:200]}", file=sys.stderr)
-    return r.returncode == 0
+        return terminal.driver(st['driver'], CTX['cfg'], CTX['root']), h
+    except ValueError:
+        return None, None
 
 
-def notify_gestion(text: str):
-    """Type one line into gestion's terminal, off the request thread. Transient socket
-    failures happen (the board is a detached process): retry immediately twice, then hand
-    over to the watcher's retry queue so a wake-up is never lost while the board lives."""
-    def run():
-        for delay in (0, 0.5, 1.5):
-            time.sleep(delay)
-            if _send_gestion(text):
-                return
-        with PENDING_LOCK:
-            PENDING.append(text)
-    threading.Thread(target=run, daemon=True).start()
+def notification_available():
+    drv, h = _primary_terminal()
+    return bool(h and drv.available())
+
+
+def _send_primary(text):
+    drv, h = _primary_terminal()
+    if not h or not drv.available():
+        return False
+    return drv.send(h, text + '\n')
+
+
+def notify_primary(text):
+    path = CTX['state'] / 'notifications.json'
+    with storage.locked(path.with_suffix('.lock')):
+        pending = storage.read_json(path, [])
+        if not any(item['text'] == text for item in pending):
+            pending.append({'id': uuid.uuid4().hex, 'text': text, 'at': tasklib.now()})
+            storage.write_json(path, pending)
 
 
 def retry_pending():
-    with PENDING_LOCK:
-        items, PENDING[:] = PENDING[:], []
-    for text in items:
-        if not _send_gestion(text):
-            with PENDING_LOCK:
-                PENDING.append(text)
-            return                               # still down — keep order, try again next tick
+    path = CTX['state'] / 'notifications.json'
+    # Serialize senders, but release the queue lock during terminal I/O so HTTP stays responsive.
+    with storage.locked(CTX['state'] / 'notification-sender.lock'):
+        while True:
+            with storage.locked(path.with_suffix('.lock')):
+                pending = storage.read_json(path, [])
+                if not pending:
+                    return
+                item = pending[0]
+            if not _send_primary(item['text']):
+                return
+            with storage.locked(path.with_suffix('.lock')):
+                pending = storage.read_json(path, [])
+                storage.write_json(path, [p for p in pending if p['id'] != item['id']])
 
 
 # ---------- SSE hub + file watcher -------------------------------------------
@@ -134,6 +148,18 @@ class Hub:
 HUB = Hub()
 
 
+def state_signature():
+    paths = [*(CTX['state'] / 'sessions').glob('*.json'),
+             CTX['state'] / 'terminal.json', CTX['state'] / 'notifications.json']
+    result = []
+    for path in paths:
+        try:
+            result.append((str(path), path.stat().st_mtime_ns))
+        except FileNotFoundError:
+            pass
+    return tuple(sorted(result))
+
+
 def watcher():
     """Poll mtimes of tasks/ and sessions/ every 500 ms; broadcast diffs as SSE events."""
     seen_tasks, seen_sess = {}, None
@@ -160,8 +186,7 @@ def watcher():
                             pass
             seen_tasks = cur
 
-            sd = CTX["state"] / "sessions"
-            sig = tuple(sorted((p.name, p.stat().st_mtime_ns) for p in sd.glob("*.json"))) if sd.is_dir() else ()
+            sig = state_signature()
             if not first and sig != seen_sess:
                 HUB.send("state", api_state())
             seen_sess, first = sig, False
@@ -207,7 +232,7 @@ class Handler(BaseHTTPRequestHandler):
     # routes
     def do_GET(self):
         if self.path in ("/", "/index.html"):
-            return self._file(CTX["root"] / "tools" / "board" / "index.html", "text/html; charset=utf-8")
+            return self._file(Path(__file__).resolve().parent.parent / "tools" / "board" / "index.html", "text/html; charset=utf-8")
         if self.path == "/api/tasks":
             return self._json(200, tasklib.load_all(CTX["shared"]))
         if self.path == "/api/state":
@@ -229,9 +254,11 @@ class Handler(BaseHTTPRequestHandler):
                 if not str(d.get("title", "")).strip():
                     return self._err(400, "title required")
                 t = tasklib.create(CTX["shared"], d["title"], team=str(d.get("team", "-")),
-                                   status=str(d.get("status", "backlog")), jira=str(d.get("jira", "")),
+                                   status=str(d.get("status", "backlog")), ref=str(d.get("ref", "")),
                                    description=str(d.get("description", "")), criteria=str(d.get("criteria", "")),
-                                   by="human")
+                                   by="human", primary=CTX['primary'],
+                                   teams=[t['name'] for t in CTX['cfg']['teams'] if t.get('enabled', True)],
+                                   **{k: str(d.get(k, '')) for k in ('scope', 'verify', 'decisions', 'depends')})
                 if t["status"] == "todo":
                     self._wake(t)
                 return self._json(201, t)
@@ -243,7 +270,7 @@ class Handler(BaseHTTPRequestHandler):
                     return self._err(400, "text required")
                 t = tasklib.append_log(CTX["shared"], tid, f"human: {text}")
                 if d.get("notify"):
-                    notify_gestion(f"COMMENT {tid} | new human note — see {self._rel(tid)} ## Log")
+                    notify_primary(f"COMMENT {tid} | new human note — see {self._rel(tid)} ## Log")
                 return self._json(200, t)
             self._err(404, "not found")
         except FileNotFoundError:
@@ -258,13 +285,12 @@ class Handler(BaseHTTPRequestHandler):
         try:
             d = self._body()
             prev = tasklib.load(CTX["shared"], tid)
-            allowed = {k: d[k] for k in ("title", "team", "status", "blocked", "jira", "description", "criteria") if k in d}
+            allowed = {k: d[k] for k in tasklib.EDITABLE if k in d}
             if not allowed:
                 return self._err(400, "nothing to change")
-            t = tasklib.update(CTX["shared"], tid, allowed)
+            t = tasklib.update(CTX["shared"], tid, allowed, primary=CTX['primary'],
+                               teams=[t['name'] for t in CTX['cfg']['teams'] if t.get('enabled', True)])
             if t["status"] != prev["status"]:
-                tasklib.append_log(CTX["shared"], tid, f"human: {prev['status']} → {t['status']} (board)")
-                t = tasklib.load(CTX["shared"], tid)
                 if t["status"] == "todo":
                     self._wake(t)
             return self._json(200, t)
@@ -275,8 +301,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_DELETE(self):
         tid = self._tid()
-        if not tid:
-            return self._err(404, "not found")
+        if not tid or not tasklib.path_of(CTX["shared"], tid).exists():
+            return self._err(404, f"{tid or 'ticket'} not found")
         tasklib.delete(CTX["shared"], tid)
         self._json(200, {"deleted": tid})
 
@@ -285,7 +311,7 @@ class Handler(BaseHTTPRequestHandler):
         return f"{CTX['shared']}/tasks/{tid}.md"
 
     def _wake(self, t: dict):
-        notify_gestion(f"NEW {t['id']} | {t['title']} — read {self._rel(t['id'])}, refine (team, criteria) and dispatch")
+        notify_primary(f"NEW {t['id']} | {t['title']} — read {self._rel(t['id'])}, refine (team, criteria) and dispatch")
 
     def _file(self, path: Path, ctype: str):
         try:
@@ -325,10 +351,11 @@ class Handler(BaseHTTPRequestHandler):
 # ---------- lifecycle --------------------------------------------------------
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--root", type=Path, required=True, help="the teams/ directory (holds teams.json)")
+    ap.add_argument("--root", type=Path, required=True, help="the instance directory, .teams/ by default (holds teams.json)")
+    ap.add_argument('--config', type=Path, help='exact configuration file')
     ap.add_argument("--port", type=int, default=None, help="override board.port from teams.json (0 = OS-picked)")
     a = ap.parse_args()
-    load_ctx(a.root.resolve())
+    load_ctx(a.root.resolve(), a.config)
 
     port = a.port if a.port is not None else int(CTX["board"].get("port", 0) or 0)
     class Server(ThreadingHTTPServer):

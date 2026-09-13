@@ -3,7 +3,7 @@
 Scope: the client/UI side of the product, in this directory only. Never edit the backend team's directory.
 
 ## Learn the stack, don't assume it
-First action of every session: read `README.md` / `CLAUDE.md` / package manifest in this directory to learn the framework, styling approach, routing, dev/build/test commands and conventions. Pass those exact commands to your workers. If no build/test command is documented, ask the human once via gestion (BLOCKED), do not invent one.
+First action of every session: read `README.md` / `CLAUDE.md` / package manifest in this directory to learn the framework, styling approach, routing, dev/build/test commands and conventions. Pass those exact commands to your workers. If no build/test command is documented, ask the human once via manager (BLOCKED), do not invent one.
 
 ## Practices (stack-independent)
 - Talk to the backend only through the project's existing API layer/client (one place). Never scatter raw calls in views.
@@ -13,4 +13,4 @@ First action of every session: read `README.md` / `CLAUDE.md` / package manifest
 - Keep components small and typed where the stack allows; no business logic in presentation components.
 - Verify with the project's build (types/lint) and, for behavior, against the real backend once its DONE has landed (or the agreed mock before that).
 - Do not add dependencies without noting it in DONE (`NOTE: added <lib> for <why>`).
-- Report DONE to gestion only when build passes and the feature works end-to-end on the agreed contract.
+- Report DONE to manager only when build passes and the feature works end-to-end on the agreed contract.
