@@ -15,13 +15,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import tasklib
+import storage
 
 CTX = {}          # root, shared, cfg, url — filled in main()
 
 
 # ---------- config / state ---------------------------------------------------
-def load_ctx(root: Path):
-    cfg = json.loads((root / "teams.json").read_text())
+def load_ctx(root: Path, config=None):
+    cfg = json.loads((config or root / "teams.json").read_text())
     shared = (root / cfg.get("shared_dir", "shared")).resolve()
     primary = next((t["name"] for t in cfg.get("teams", []) if t.get("primary")), None)
     CTX.update(root=root, cfg=cfg, shared=shared, primary=primary,
@@ -58,7 +59,9 @@ def plan_title() -> str:
 def api_state() -> dict:
     return {"plan_title": plan_title(), "url": CTX.get("url", ""),
             "jira_base_url": CTX["board"].get("jira_base_url", ""),
-            "teams": sessions_state(), "statuses": tasklib.STATUSES}
+            "teams": sessions_state(), "statuses": tasklib.STATUSES,
+            "transitions": {key: [s for s in tasklib.STATUSES if s in values]
+                            for key, values in tasklib.TRANSITIONS.items()}}
 
 
 # ---------- wake gestion ------------------------------------------------------
@@ -207,7 +210,7 @@ class Handler(BaseHTTPRequestHandler):
     # routes
     def do_GET(self):
         if self.path in ("/", "/index.html"):
-            return self._file(CTX["root"] / "tools" / "board" / "index.html", "text/html; charset=utf-8")
+            return self._file(Path(__file__).resolve().parent.parent / "tools" / "board" / "index.html", "text/html; charset=utf-8")
         if self.path == "/api/tasks":
             return self._json(200, tasklib.load_all(CTX["shared"]))
         if self.path == "/api/state":
@@ -231,7 +234,9 @@ class Handler(BaseHTTPRequestHandler):
                 t = tasklib.create(CTX["shared"], d["title"], team=str(d.get("team", "-")),
                                    status=str(d.get("status", "backlog")), jira=str(d.get("jira", "")),
                                    description=str(d.get("description", "")), criteria=str(d.get("criteria", "")),
-                                   by="human")
+                                   by="human", primary=CTX['primary'],
+                                   teams=[t['name'] for t in CTX['cfg']['teams'] if t.get('enabled', True)],
+                                   **{k: str(d.get(k, '')) for k in ('scope', 'verify', 'decisions', 'depends')})
                 if t["status"] == "todo":
                     self._wake(t)
                 return self._json(201, t)
@@ -258,13 +263,12 @@ class Handler(BaseHTTPRequestHandler):
         try:
             d = self._body()
             prev = tasklib.load(CTX["shared"], tid)
-            allowed = {k: d[k] for k in ("title", "team", "status", "blocked", "jira", "description", "criteria") if k in d}
+            allowed = {k: d[k] for k in tasklib.EDITABLE if k in d}
             if not allowed:
                 return self._err(400, "nothing to change")
-            t = tasklib.update(CTX["shared"], tid, allowed)
+            t = tasklib.update(CTX["shared"], tid, allowed, primary=CTX['primary'],
+                               teams=[t['name'] for t in CTX['cfg']['teams'] if t.get('enabled', True)])
             if t["status"] != prev["status"]:
-                tasklib.append_log(CTX["shared"], tid, f"human: {prev['status']} → {t['status']} (board)")
-                t = tasklib.load(CTX["shared"], tid)
                 if t["status"] == "todo":
                     self._wake(t)
             return self._json(200, t)
@@ -326,9 +330,10 @@ class Handler(BaseHTTPRequestHandler):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--root", type=Path, required=True, help="the teams/ directory (holds teams.json)")
+    ap.add_argument('--config', type=Path, help='exact configuration file')
     ap.add_argument("--port", type=int, default=None, help="override board.port from teams.json (0 = OS-picked)")
     a = ap.parse_args()
-    load_ctx(a.root.resolve())
+    load_ctx(a.root.resolve(), a.config)
 
     port = a.port if a.port is not None else int(CTX["board"].get("port", 0) or 0)
     class Server(ThreadingHTTPServer):

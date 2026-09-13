@@ -9,3 +9,4 @@ rules/*.md
 !rules/.gitkeep
 shared/PLAN.md
 shared/CONTRACTS.md
+shared/.locks/

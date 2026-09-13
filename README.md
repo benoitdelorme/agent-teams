@@ -32,9 +32,9 @@ Then describe a feature to gestion and wait.
 
 `teams up` also starts a local web board (URL printed in the terminal, e.g. `board → http://127.0.0.1:52190`) bound live to the ticket files in `shared/tasks/` — dark kanban with five columns: Backlog · TODO · En cours · Ready for QA · Done.
 
-- **Files are the source of truth.** One ticket = one markdown file `shared/tasks/T<n>.md` (frontmatter + `## Description / ## Criteria / ## Log`). The board watches them and updates live over SSE; agents just edit files.
+- **Files are the source of truth.** One ticket = one markdown file `shared/tasks/T<n>.md` (frontmatter + Description, Criteria and Log; optional Scope, Verify, Decisions and Depends). The board watches them and updates live over SSE; agents use the CLI so concurrent changes share the same locked writer.
 - **Two entry doors, one data path.** Create tickets on the board (backlog → groom → drag to TODO, which wakes gestion with one line typed in its terminal) or talk to gestion, which creates the same files via `teams task new`. Ids (`T<n>`) come from one atomic counter — a Jira key is an optional label on top (`board.jira_base_url` in teams.json makes it a link).
-- **Traces for free.** The SendMessage hook mirrors every `TASK/DONE/BLOCKED T<n>` message into the ticket's `## Log` and updates its status (TASK→doing, DONE→qa, BLOCKED→flag). Backlog is never read by gestion.
+- **Automatic traces.** Recognized inter-team messages are validated before sending and mirrored after tool success (TASK→doing, DONE→qa, BLOCKED→flag). Failed sends leave tickets unchanged. The log keeps messages, comments and status/assignment/blocking changes; ordinary text edits stay quiet.
 - Zero dependency: the server is stdlib Python (`bin/teams-board`), the UI one static HTML file. Inside programa it runs as a "board" tab next to gestion's session (required: `programa send` only accepts clients living in a real pane, so a detached server could not wake gestion). `teams board [--port N]` starts it alone; `teams down` stops it.
 
 ```bash
@@ -60,7 +60,42 @@ bin/teams cost         # tokens per team, lead vs workers, per model
 bin/teams up --resume  # after a crash: re-attach, restart dead sessions with their context
 ```
 
-Every message between teams is logged automatically to `shared/LOG.md` (hook-based, costs no tokens).
+Recognized inter-team messages are logged to `shared/LOG.md` by hooks. Native messages to
+sub-agents and free-form exchanges pass through normally. A protocol message referring to
+an unknown ticket or invalid owner is rejected before sending.
+
+A fresh `teams up` starts a new current-session record. Prior session/message records move
+to `.state/history/<timestamp>/`; `teams cost` uses the current run. `up --resume` uses each
+team's recorded session ID, or starts that team fresh when no ID exists.
+
+### Ticket editing and message recovery
+
+The board gets permitted status transitions from the server and offers valid destinations.
+Optional work context is editable under “Contexte de travail” in the ticket dialog and through
+`teams task set`: `scope`, `verify`, `decisions`, `depends`. These fields hold instructions
+and references for the agents. Gestion records its verification result before closing QA.
+
+`.state/messages/` records `attempted`, `sent`, `failed` and `sync_failed` tool events. Sent
+means the tool succeeded, not that the recipient has processed the message. If a ticket
+changes between the pre- and post-hook, the sent message and synchronization error remain
+on disk and the lead receives a warning. Missing tracking IDs also produce a warning and
+skip ticket mutation, because replay cannot be made reliable. Session/tool-use IDs deduplicate
+replayed successful events. Inspect `sync_failed` records before reconciling ticket state;
+do not resend the original task blindly.
+
+Message records use one shared lock and are archived with each fresh run. Archives remain
+available for inspection; active records are scoped to the current run. Role checks use the
+launcher's team identity and govern CLI/hook operations, not arbitrary direct file edits.
+
+### Tests
+
+```bash
+python3 -B -m unittest discover -s tests -v
+node --test tests/board-ui.test.cjs
+```
+
+Tests exercise concurrent ticket updates, message routing/replay, session lifecycle and a
+real loopback HTTP server with temporary data. Terminal calls and learning calls are mocked.
 
 ## Configuration
 

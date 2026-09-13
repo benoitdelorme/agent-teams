@@ -2,7 +2,7 @@
 """teams — launch/manage a set of Claude Code team sessions inside programa.
 
   teams up [--dry-run] [--resume]       one named programa workspace per team, claude started in each, primary selected
-                                        --resume: re-attach to a running setup, restart dead sessions with --continue
+                                        --resume: re-attach to a running setup, restart dead sessions with exact --resume IDs
   teams status                          liveness per team, PLAN.md task summary, tail of shared/LOG.md
   teams cost                            token usage per team (lead vs workers, per model); $ if prices_per_mtok is set
   teams learn [team|all] [--force]      MANUAL: scan a team's repo once, one cheap LLM call → rules/<team>.md digest (cached by fingerprint)
@@ -22,6 +22,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import tasklib
+import hooklib
+import storage
 
 HERE = Path(__file__).resolve().parent.parent          # teams/
 DEFAULT_CONFIG = HERE / "teams.json"
@@ -53,8 +55,16 @@ Rules: prefer what CLAUDE.md/README/AGENTS.md state over what you infer. If CLAU
 
 # ---------- config -----------------------------------------------------------
 def load(cfg_path: Path) -> dict:
+    global STATE, SESS, RULES, BOARD_STATE, BOARD_WS
+    cfg_path = cfg_path.resolve()
     cfg = json.loads(cfg_path.read_text())
+    cfg["_path"] = cfg_path
     cfg["_root"] = cfg_path.parent
+    STATE = cfg['_root'] / '.state' / 'surfaces.json'
+    SESS = STATE.parent / 'sessions'
+    RULES = cfg['_root'] / 'rules'
+    BOARD_STATE = STATE.parent / 'board.json'
+    BOARD_WS = STATE.parent / 'board-ws.json'
     cfg["shared_abs"] = (cfg["_root"] / cfg.get("shared_dir", "shared")).resolve()
     cfg["teams"] = [t for t in cfg["teams"] if t.get("enabled", True)]
     runners = cfg.setdefault("runners", {"claude": {"command": "claude"}})
@@ -178,7 +188,7 @@ def system_prompt(cfg: dict, team: dict, surfaces: dict) -> str:
     ] if x)
     vars = {"team": team["name"], "cwd": str(team["cwd_abs"]), "shared_dir": str(cfg["shared_abs"]), "root": str(cfg["_root"])}
     parts = [
-        (cfg["_root"] / "prompts" / "_common.md").read_text(),
+        render((cfg["_root"] / "prompts" / "_common.md").read_text(), vars),
         workers_text(cfg, team),
         render(team["prompt_abs"].read_text(), vars),
         rules,
@@ -189,10 +199,10 @@ def system_prompt(cfg: dict, team: dict, surfaces: dict) -> str:
 
 
 def claude_cmd(cfg: dict, team: dict, surfaces: dict) -> list[str]:
-    prompt_file = HERE / ".state" / f"prompt-{team['name']}.md"
+    prompt_file = cfg['_root'] / ".state" / f"prompt-{team['name']}.md"
     prompt_file.parent.mkdir(exist_ok=True)
     prompt_file.write_text(system_prompt(cfg, team, surfaces))
-    agents_file = HERE / ".state" / f"agents-{team['name']}.json"
+    agents_file = cfg['_root'] / '.state' / f"agents-{team['name']}.json"
     agents_file.write_text(build_agents_json(cfg, team))
     runner = team["runner"]
     cmd = [runner.get("command", "claude"), "-n", team["name"],
@@ -202,7 +212,7 @@ def claude_cmd(cfg: dict, team: dict, surfaces: dict) -> list[str]:
            "--add-dir", str(cfg["shared_abs"])]
     for d in [*cfg["defaults"].get("add_dirs", []), *team.get("add_dirs", [])]:
         cmd += ["--add-dir", str((cfg["_root"] / d).resolve())]
-    cmd += ["--settings", hook_settings_json(team)]
+    cmd += ["--settings", hook_settings_json(cfg, team)]
     pm = team.get("permission_mode", cfg.get("permission_mode"))
     if pm == "yolo":
         cmd.append("--dangerously-skip-permissions")
@@ -211,62 +221,35 @@ def claude_cmd(cfg: dict, team: dict, surfaces: dict) -> list[str]:
     for flag in runner.get("drop_flags", []):          # runners that set their own model/effort
         while flag in cmd:
             i = cmd.index(flag); del cmd[i:i + 2]
-    return cmd
+    return ['env', f"TEAMS_TEAM={team['name']}", f"TEAMS_CONFIG={cfg['_path']}", *cmd]
 
 
-def hook_settings_json(team: dict) -> str:
-    """Claude Code hooks that make each team session report to .state/ — no reliance on prompts."""
-    hook = f"TEAMS_TEAM={shlex.quote(team['name'])} TEAMS_ROOT={shlex.quote(str(HERE))} python3 {shlex.quote(str(SELF))} _hook"
-    ev = lambda: [{"matcher": "", "hooks": [{"type": "command", "command": hook, "timeout": 5}]}]
+def hook_settings_json(cfg: dict, team: dict) -> str:
+    hook = (f"TEAMS_TEAM={shlex.quote(team['name'])} "
+            f"TEAMS_CONFIG={shlex.quote(str(cfg['_path']))} "
+            f"TEAMS_RUN={shlex.quote(hooklib.run_id(cfg['_root']) or '')} python3 {shlex.quote(str(SELF))} _hook")
+    def entry(matcher=''):
+        return [{"matcher": matcher, "hooks": [{"type": "command", "command": hook, "timeout": 5}]}]
     return json.dumps({"hooks": {
-        "SessionStart": ev(), "UserPromptSubmit": ev(), "Stop": ev(), "SessionEnd": ev(),
-        "PreToolUse": [{"matcher": "SendMessage", "hooks": [{"type": "command", "command": hook, "timeout": 5}]}],
+        "SessionStart": entry(), "UserPromptSubmit": entry(), "Stop": entry(), "SessionEnd": entry(),
+        "PreToolUse": entry('SendMessage'), "PostToolUse": entry('SendMessage'),
+        "PostToolUseFailure": entry('SendMessage'),
     }})
 
 
 def cmd_hook():
-    """Entry point for the injected hooks (stdin = hook JSON). Never fails the tool call."""
-    team, root = os.environ.get("TEAMS_TEAM", "?"), Path(os.environ.get("TEAMS_ROOT", str(HERE)))
+    event = {}
     try:
-        d = json.loads(sys.stdin.read() or "{}")
-    except json.JSONDecodeError:
-        d = {}
-    ev = d.get("hook_event_name", "")
-    sess_dir = root / ".state" / "sessions"; sess_dir.mkdir(parents=True, exist_ok=True)
-    f = sess_dir / f"{team}.json"
-    try:
-        st = json.loads(f.read_text()) if f.exists() else {}
-    except json.JSONDecodeError:
-        st = {}
-    st.update({k: d[k] for k in ("session_id", "transcript_path", "cwd") if d.get(k)})
-    st["status"] = {"SessionStart": "idle", "UserPromptSubmit": "working", "Stop": "idle", "SessionEnd": "gone"}.get(ev, st.get("status", "?"))
-    st["updated"] = datetime.now().isoformat(timespec="seconds")
-    st.setdefault("sessions", [])
-    if d.get("session_id") and d["session_id"] not in st["sessions"]:
-        st["sessions"].append(d["session_id"])
-    if ev == "SessionEnd":
-        st.pop("session_id", None)
-    f.write_text(json.dumps(st, indent=2))
-    if ev == "PreToolUse" and d.get("tool_name") == "SendMessage":
-        ti = d.get("tool_input", {})
-        msg = ti.get("message"); msg = msg if isinstance(msg, str) else json.dumps(msg)
-        head, _, body = msg.partition("\n")
-        cfg_shared = None
-        try:
-            cfg = json.loads((root / "teams.json").read_text())
-            cfg_shared = (root / cfg.get("shared_dir", "shared")).resolve()
-        except Exception:
-            cfg_shared = root / "shared"
-        line = f"{datetime.now():%H:%M:%S} {team} → {ti.get('to','?')} | {head.strip()}"
-        if body.strip():
-            line += f"\n    " + "\n    ".join(l for l in body.strip().splitlines()[:5])
-        with open(cfg_shared / "LOG.md", "a") as fh:
-            fh.write(line + "\n")
-        try:                                   # mirror TASK/DONE/BLOCKED T<n> into the ticket files (free, no tokens)
-            tasklib.apply_message(cfg_shared, team, ti.get("to", "?"), head)
-        except Exception:
-            pass
-    print("{}")
+        event = json.loads(sys.stdin.read() or '{}')
+        warning = hooklib.handle(Path(os.environ.get('TEAMS_CONFIG', str(DEFAULT_CONFIG))),
+                                 os.environ.get('TEAMS_TEAM', '?'), event,
+                                 os.environ.get('TEAMS_RUN') or None)
+        print(json.dumps({'systemMessage': warning} if warning else {}))
+    except (OSError, ValueError, KeyError, StopIteration) as exc:
+        if event.get('hook_event_name') == 'PreToolUse':
+            print(f'teams: {exc}', file=sys.stderr)
+            sys.exit(2)
+        print(json.dumps({'systemMessage': f'teams event could not be applied: {exc}'}))
 
 
 def pretrust(cfg: dict):
@@ -403,7 +386,8 @@ def cmd_learn(cfg: dict, a):
             print(f"[{t['name']}] FAILED: {r.stderr.strip()[:300]}"); continue
         digest = "\n".join(r.stdout.strip().splitlines()[:70])
         f.write_text(f"<!-- generated by `teams learn` — fingerprint: {fp} — {datetime.now():%Y-%m-%d %H:%M} — model: {a.model} — do not edit; put your own rules in {t['name']}.local.md -->\n{digest}\n")
-        print(f"[{t['name']}] wrote {f.relative_to(HERE)} ({len(digest.splitlines())} lines)")
+        print(f"[{t['name']}] wrote {f.relative_to(cfg['_root'])} ({len(digest.splitlines())} lines)")
+
 
 
 def check_rules_fresh(cfg: dict):
@@ -545,7 +529,8 @@ def workspace_surface(ws_ref: str) -> str:
 
 
 def cmd_up(cfg: dict, a):
-    pretrust(cfg)
+    if not a.dry_run:
+        pretrust(cfg)
     check_rules_fresh(cfg)
     if not a.dry_run:
         preflight_runners(cfg)
@@ -553,11 +538,18 @@ def cmd_up(cfg: dict, a):
     ordered = [t for t in cfg["teams"] if not t.get("primary")] + [primary]   # primary last -> ends up selected
     surfaces, workspaces = {}, {}
     if a.dry_run or not in_programa():
+        if not a.dry_run and not a.resume:
+            if load_state():
+                die("teams already up; use --resume or teams down first")
+            hooklib.begin_run(cfg["_root"])
         if not a.dry_run:
             print("Not inside programa - printing commands to run manually (one per terminal):\n")
         for t in ordered:
             print(f"# {t['name']}  (cd {t['cwd_abs']})")
-            print(shell_line(claude_cmd(cfg, t, surfaces)), "\n")
+            command = claude_cmd(cfg, t, surfaces)
+            if a.resume and session_info(t["name"]).get("session_id"):
+                command += ["--resume", session_info(t["name"])["session_id"]]
+            print(shell_line(command), "\n")
         write_roster_json(cfg, surfaces)
         if not a.dry_run:
             start_board(cfg)
@@ -580,8 +572,7 @@ def cmd_up(cfg: dict, a):
         print(f"[{t['name']}] workspace {ws} / surface {surfaces[t['name']]}")
     save_state({"surfaces": surfaces, "workspaces": workspaces, "started_at": datetime.now().isoformat(timespec="seconds")})
     write_roster_json(cfg, surfaces)
-    for f in SESS.glob("*.json"):
-        f.unlink()
+    hooklib.begin_run(cfg["_root"])
     # 2) launch claude in each workspace (after its shell prompt is up)
     for t in ordered:
         wait_shell(workspaces[t["name"]], surfaces[t["name"]], cfg)
@@ -720,7 +711,7 @@ def start_board(cfg: dict, port: int | None = None):
         return
     BOARD_STATE.parent.mkdir(exist_ok=True)
     BOARD_STATE.unlink(missing_ok=True)
-    cmd = [sys.executable, str(BOARD_BIN), "--root", str(HERE)] + (["--port", str(port)] if port else [])
+    cmd = [sys.executable, str(BOARD_BIN), "--root", str(cfg['_root']), '--config', str(cfg['_path'])] + (["--port", str(port)] if port is not None else [])
     if in_programa():
         bws = board_ws_state()
         if not (bws.get("workspace") and bws.get("surface") and surface_exists(bws["workspace"], bws["surface"])):
@@ -741,7 +732,7 @@ def start_board(cfg: dict, port: int | None = None):
         programa("send", "--workspace", bws["workspace"], "--surface", bws["surface"],
                  f"cd {shlex.quote(str(HERE))} && clear && " + shell_line(cmd) + "\n")
     else:
-        log = open(HERE / ".state" / "board.log", "ab")
+        log = open(cfg['_root'] / ".state" / "board.log", "ab")
         subprocess.Popen(cmd, stdout=log, stderr=log, start_new_session=True)
     for _ in range(60):
         time.sleep(0.1)
@@ -771,21 +762,26 @@ def cmd_board(cfg: dict, a):
 # ---------- tickets (teams task …) -------------------------------------------
 def cmd_task(cfg: dict, a):
     sh = cfg["shared_abs"]
+    identity = {"actor": os.environ.get("TEAMS_TEAM", "human"),
+                "primary": next(t["name"] for t in cfg["teams"] if t.get("primary"))}
+    names = [t['name'] for t in cfg['teams']]
     if a.tcmd == "new":
         t = tasklib.create(sh, " ".join(a.title), team=a.team or "-", status=a.status, jira=a.jira or "",
-                           description=a.desc or "", criteria=a.criteria or "", by="gestion")
+                           description=a.desc or "", criteria=a.criteria or "", by=identity["actor"],
+                           primary=identity["primary"], teams=names, scope=a.scope or "",
+                           verify=a.verify or "", decisions=a.decisions or "", depends=a.depends or "")
         print(t["id"])
     elif a.tcmd == "set":
         changes = {}
         for pair in a.pairs:
             k, sep, v = pair.partition("=")
-            if not sep or k not in ("title", "team", "status", "blocked", "jira", "description", "criteria"):
-                die(f"task set: expected key=value with key in title|team|status|blocked|jira|description|criteria, got {pair!r}")
+            if not sep or k not in tasklib.EDITABLE:
+                die(f"task set: expected key=value with key in {sorted(tasklib.EDITABLE)}, got {pair!r}")
             changes[k] = v
-        t = tasklib.update(sh, a.id, changes)
+        t = tasklib.update(sh, a.id, changes, **identity, teams=names)
         print(f"{t['id']} {t['status']}{' ⛔' if t['blocked'] else ''} [{t['team']}]")
     elif a.tcmd == "log":
-        tasklib.append_log(sh, a.id, " ".join(a.text))
+        tasklib.append_log(sh, a.id, " ".join(a.text), **identity)
         print("ok")
     elif a.tcmd == "list":
         ts = tasklib.load_all(sh)
@@ -826,7 +822,7 @@ def cmd_status(cfg: dict, a):
 
 
 def cmd_resume(cfg: dict, ordered: list, primary: dict):
-    """Re-attach to an existing `up`: recreate missing workspaces, restart dead sessions with --continue."""
+    """Re-attach to an existing `up`: recreate missing workspaces, restart dead sessions with exact --resume IDs."""
     st = load_state()
     if not st:
         die("nothing to resume (no state) — run `teams up`")
@@ -846,10 +842,12 @@ def cmd_resume(cfg: dict, ordered: list, primary: dict):
             print(f"[{n}] alive — untouched")
             continue
         cmd = claude_cmd(cfg, t, surfaces)
-        cmd.insert(1, "--continue")                      # resume that dir's latest conversation
+        sid = session_info(n).get('session_id')
+        if sid:
+            cmd += ['--resume', sid]
         wait_shell(workspaces[n], surfaces[n], cfg)
         programa("send", "--workspace", workspaces[n], "--surface", surfaces[n], shell_line(cmd) + "\n")
-        print(f"[{n}] restarted with --continue")
+        print(f"[{n}] restarted with --resume {sid}" if sid else f"[{n}] started a fresh session (no recorded id)")
     with open(cfg["shared_abs"] / "LOG.md", "a") as fh:
         fh.write(f"\n## resume {datetime.now():%Y-%m-%d %H:%M}\n")
     start_board(cfg)
@@ -960,7 +958,7 @@ def main():
     if len(sys.argv) > 1 and sys.argv[1] == "_hook":
         return cmd_hook()
     p = argparse.ArgumentParser(prog="teams", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
+    p.add_argument("--config", type=Path, default=Path(os.environ.get("TEAMS_CONFIG", str(DEFAULT_CONFIG))))
     sub = p.add_subparsers(dest="cmd", required=True)
     s = sub.add_parser("up"); s.add_argument("--dry-run", action="store_true"); s.add_argument("--resume", action="store_true")
     sub.add_parser("status")
@@ -970,6 +968,8 @@ def main():
     s = sub.add_parser("msg"); s.add_argument("team"); s.add_argument("text", nargs="+")
     s = sub.add_parser("task"); tsub = s.add_subparsers(dest="tcmd", required=True)
     x = tsub.add_parser("new"); x.add_argument("title", nargs="+"); x.add_argument("--team"); x.add_argument("--status", default="backlog", choices=tasklib.STATUSES); x.add_argument("--jira"); x.add_argument("--desc"); x.add_argument("--criteria")
+    for key in ('scope', 'verify', 'decisions', 'depends'):
+        x.add_argument('--' + key)
     x = tsub.add_parser("set"); x.add_argument("id"); x.add_argument("pairs", nargs="+", metavar="key=value")
     x = tsub.add_parser("log"); x.add_argument("id"); x.add_argument("text", nargs="+")
     x = tsub.add_parser("list"); x.add_argument("--status", choices=tasklib.STATUSES)
@@ -989,4 +989,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except (ValueError, OSError) as exc:
+        die(str(exc))

@@ -48,6 +48,7 @@
        height:calc(100% - 52px);padding:14px 16px 16px;overflow-x:auto}
   .col{display:flex;flex-direction:column;min-width:0;border-radius:var(--r);
        background:var(--panel);border:1px solid var(--border-soft);transition:border-color .12s, background .12s}
+  .col.drop-disabled{opacity:.45}
   .col.drop{border-color:#3a577f;background:#151a21}
   .col-head{display:flex;align-items:center;gap:8px;padding:11px 13px 9px}
   .col-head h2{font-size:12px;font-weight:650;letter-spacing:.7px;text-transform:uppercase;color:var(--muted)}
@@ -166,7 +167,7 @@ const HUES = ["#4dd0e1","#a78bfa","#f5b83d","#f06292","#81c784","#ffb74d","#64b5
 const $ = s => document.querySelector(s);
 
 let TASKS = new Map();          // id -> task
-let META  = {teams: [], jira_base_url: "", plan_title: ""};
+let META  = {teams: [], jira_base_url: "", plan_title: "", transitions: {}};
 let open_id = null;             // ticket in the modal
 let drag = null;                // {id, ghost, fromCol}
 let renderQueued = false;
@@ -276,6 +277,12 @@ function showNewForm(){
 }
 
 /* ---------- drag & drop ---------- */
+function canTransition(from, to){
+  return from === to || (META.transitions?.[from] || []).includes(to);
+}
+function statusOptions(status){
+  return COLS.map(([s,l]) => `<option value="${s}"${canTransition(status,s) ? "" : " disabled"}>${l}</option>`).join("");
+}
 function onPointerDown(e){
   if (e.button !== 0) return;
   const card = e.currentTarget;
@@ -307,17 +314,22 @@ function dragMove(ev){
   drag.ghost.style.left = ev.clientX - 20 + "px";
   drag.ghost.style.top  = ev.clientY - 14 + "px";
   const col = document.elementFromPoint(ev.clientX, ev.clientY)?.closest(".col");
-  document.querySelectorAll(".col").forEach(c => c.classList.toggle("drop", c === col));
-  drag.over = col?.dataset.status || null;
+  const from = TASKS.get(drag.id)?.status;
+  document.querySelectorAll(".col").forEach(c => {
+    const allowed = canTransition(from, c.dataset.status);
+    c.classList.toggle("drop-disabled", !allowed);
+    c.classList.toggle("drop", allowed && c === col);
+  });
+  drag.over = col && canTransition(from, col.dataset.status) ? col.dataset.status : null;
 }
 async function endDrag(){
   const {id, ghost, card, over} = drag;
   drag = null;
   ghost.remove();
   card.classList.remove("dragging");
-  document.querySelectorAll(".col").forEach(c => c.classList.remove("drop"));
+  document.querySelectorAll(".col").forEach(c => c.classList.remove("drop", "drop-disabled"));
   const t = TASKS.get(id);
-  if (!over || !t || t.status === over) { render(); return; }
+  if (!over || !t || t.status === over || !canTransition(t.status, over)) { render(); return; }
   const prev = t.status;
   t.status = over; render();                        // optimiste
   try {
@@ -356,6 +368,12 @@ function renderModal(full){
         <div>
           <div class="f"><label>Description</label><textarea id="m-desc" rows="4" placeholder="Contexte, but…"></textarea></div>
           <div class="f"><label>Criteria</label><textarea id="m-crit" rows="3" placeholder="- build green&#10;- …"></textarea></div>
+          <details class="f"><summary>Contexte de travail (optionnel)</summary>
+            <div class="f"><label for="m-scope">Périmètre</label><textarea id="m-scope" rows="2" placeholder="Fichiers ou dossiers concernés"></textarea></div>
+            <div class="f"><label for="m-verify">Vérification</label><textarea id="m-verify" rows="2" placeholder="Commandes ou vérifications attendues"></textarea></div>
+            <div class="f"><label for="m-decisions">Décisions de référence</label><textarea id="m-decisions" rows="2" placeholder="Documents ou sections de référence"></textarea></div>
+            <div class="f"><label for="m-depends">Dépendances</label><textarea id="m-depends" rows="1" placeholder="Tickets liés"></textarea></div>
+          </details>
           <div class="f"><label>Log</label><div id="m-log"></div>
             <div class="comment">
               <input type="text" id="m-comment" placeholder="Note pour le ticket…" spellcheck="false">
@@ -364,7 +382,7 @@ function renderModal(full){
             </div></div>
         </div>
         <div class="side">
-          <div class="f"><label>Statut</label><select id="m-status">${COLS.map(([s,l]) => `<option value="${s}">${l}</option>`).join("")}</select></div>
+          <div class="f"><label>Statut</label><select id="m-status">${statusOptions(t.status)}</select></div>
           <div class="f"><label>Team</label><select id="m-team"><option value="-">—</option>${META.teams.filter(x => !x.primary).map(x => `<option>${esc(x.name)}</option>`).join("")}</select></div>
           <div class="f"><label>Jira</label><input type="text" id="m-jira" placeholder="LUM-482" spellcheck="false"></div>
           <div class="f"><label class="switch" style="text-transform:none;letter-spacing:0"><input type="checkbox" id="m-blocked"> <span>Bloqué</span></label></div>
@@ -377,6 +395,7 @@ function renderModal(full){
     bindField("#m-desc", "description");
     bindField("#m-crit", "criteria");
     bindField("#m-jira", "jira", v => v.trim());
+    for (const key of ["scope", "verify", "decisions", "depends"]) bindField("#m-" + key, key);
     $("#m-status").onchange = e => patch({status: e.target.value});
     $("#m-team").onchange = e => patch({team: e.target.value});
     $("#m-blocked").onchange = e => patch({blocked: e.target.checked});
@@ -390,6 +409,8 @@ function renderModal(full){
   }
   // values — never clobber the field being edited
   setVal("#m-title", t.title); setVal("#m-desc", t.description); setVal("#m-crit", t.criteria);
+  for (const key of ["scope", "verify", "decisions", "depends"]) setVal("#m-" + key, t[key] || "");
+  for (const option of $("#m-status").options) option.disabled = !canTransition(t.status, option.value);
   setVal("#m-status", t.status); setVal("#m-team", t.team); setVal("#m-jira", t.jira);
   const bl = $("#m-blocked"); if (document.activeElement !== bl) bl.checked = t.blocked;
   const badge = $("#m-teambadge");
@@ -409,7 +430,7 @@ function setVal(sel, v){
   if (el && document.activeElement !== el && el.value !== String(v ?? "")) el.value = v ?? "";
 }
 function logHTML(line){
-  const m = line.match(/^(\d\d:\d\d:\d\d)\s+(.*)$/);
+  const m = line.match(/^((?:\d{4}-\d\d-\d\dT)?\d\d:\d\d:\d\d)\s+(.*)$/);
   const time = m ? m[1] : "", rest = m ? m[2] : line;
   const marked = esc(rest)
     .replace(/\b(TASK|DONE|BLOCKED|ASK|ANSWER|CONTRACT|NEW|COMMENT)\b/, w => `<span class="t-${w === "DONE" ? "DONE" : w === "BLOCKED" ? "BLOCKED" : "TASK"}">${w}</span>`)
@@ -431,11 +452,16 @@ function bindField(sel, key, clean){
 async function patch(changes){
   const id = open_id;
   try {
+    const current = TASKS.get(id);
+    if (changes.status && !canTransition(current?.status, changes.status)) { renderModal(false); return; }
     const t = await api("PATCH", `/api/tasks/${id}`, changes);
     TASKS.set(id, t);
     if (open_id === id) renderModal(false);
     requestRender();
-  } catch (err) { toast(err.message); }
+  } catch (err) {
+    toast(err.message);
+    if (open_id === id) renderModal(false);
+  }
 }
 async function sendComment(){
   const inp = $("#m-comment"), text = inp.value.trim();
