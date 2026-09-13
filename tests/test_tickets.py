@@ -31,7 +31,7 @@ class Tickets(Fixture):
 
     def test_header_body_reference_does_not_change_other_ticket(self):
         one, two = self.doing(), self.doing()
-        tasklib.apply_message(self.shared, 'backend', 'gestion', f'DONE {one} | follow up in {two}')
+        tasklib.apply_message(self.shared, 'backend', 'manager', f'DONE {one} | follow up in {two}')
         self.assertEqual(tasklib.load(self.shared, one)['status'], 'qa')
         self.assertEqual(tasklib.load(self.shared, two)['status'], 'doing')
 
@@ -41,35 +41,35 @@ class Tickets(Fixture):
             tasklib.apply_message(self.shared, 'backend', 'backend', f'TASK {tid} | self assign')
         tasklib.update(self.shared, tid, {'status': 'backlog'})
         with self.assertRaises(ValueError):
-            tasklib.apply_message(self.shared, 'gestion', 'backend', f'TASK {tid} | take backlog')
+            tasklib.apply_message(self.shared, 'manager', 'backend', f'TASK {tid} | take backlog')
 
     def test_wrong_owner_cannot_complete(self):
         tid = self.doing()
         with self.assertRaises(ValueError):
-            tasklib.apply_message(self.shared, 'frontend', 'gestion', f'DONE {tid} | complete')
+            tasklib.apply_message(self.shared, 'frontend', 'manager', f'DONE {tid} | complete')
 
     def test_replay_is_idempotent_even_after_other_messages(self):
         tid = self.doing()
-        tasklib.apply_message(self.shared, 'backend', 'gestion', f'DONE {tid} | ready', event_id='done')
+        tasklib.apply_message(self.shared, 'backend', 'manager', f'DONE {tid} | ready', event_id='done')
         tasklib.append_log(self.shared, tid, 'a later note')
         before = tasklib.path_of(self.shared, tid).read_text()
-        tasklib.apply_message(self.shared, 'backend', 'gestion', f'DONE {tid} | ready', event_id='done')
+        tasklib.apply_message(self.shared, 'backend', 'manager', f'DONE {tid} | ready', event_id='done')
         self.assertEqual(before, tasklib.path_of(self.shared, tid).read_text())
 
     def test_batch_validates_before_writing(self):
         one = self.doing()
         two = self.task()['id']
         with self.assertRaises(ValueError):
-            tasklib.apply_message(self.shared, 'backend', 'gestion', f'DONE {one},{two} | ready')
+            tasklib.apply_message(self.shared, 'backend', 'manager', f'DONE {one},{two} | ready')
         self.assertEqual(tasklib.load(self.shared, one)['status'], 'doing')
 
     def test_primary_closes_after_qa_and_preserves_history(self):
         tid = self.doing()
         with self.assertRaises(ValueError):
-            tasklib.update(self.shared, tid, {'status': 'done'}, actor='gestion')
-        tasklib.apply_message(self.shared, 'backend', 'gestion', f'DONE {tid} | ready')
-        tasklib.append_log(self.shared, tid, 'gestion: test passed', actor='gestion')
-        tasklib.update(self.shared, tid, {'status': 'done'}, actor='gestion')
+            tasklib.update(self.shared, tid, {'status': 'done'}, actor='manager')
+        tasklib.apply_message(self.shared, 'backend', 'manager', f'DONE {tid} | ready')
+        tasklib.append_log(self.shared, tid, 'manager: test passed', actor='manager')
+        tasklib.update(self.shared, tid, {'status': 'done'}, actor='manager')
         self.assertTrue(any('test passed' in line for line in tasklib.load(self.shared, tid)['log']))
         tasklib.delete(self.shared, tid)
         self.assertFalse(tasklib.path_of(self.shared, tid).exists())
@@ -77,7 +77,7 @@ class Tickets(Fixture):
 
     def test_primary_can_edit_while_owner_cannot_self_approve(self):
         tid = self.doing()
-        tasklib.update(self.shared, tid, {'scope': 'other.py'}, actor='gestion')
+        tasklib.update(self.shared, tid, {'scope': 'other.py'}, actor='manager')
         self.assertEqual(tasklib.load(self.shared, tid)['scope'], 'other.py')
         with self.assertRaises(ValueError):
             tasklib.update(self.shared, tid, {'title': 'new'}, actor='backend')

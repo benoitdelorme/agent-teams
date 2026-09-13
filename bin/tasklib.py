@@ -10,7 +10,7 @@ from datetime import datetime
 from pathlib import Path
 
 STATUSES = ["backlog", "todo", "doing", "qa", "done"]
-META_KEYS = ["id", "title", "team", "status", "blocked", "jira", "created", "updated", "by"]
+META_KEYS = ["id", "title", "team", "status", "blocked", "ref", "created", "updated", "by"]
 _ID = re.compile(r"^T\d+$")
 
 
@@ -59,11 +59,11 @@ def parse(path: Path) -> tuple[dict, str]:
             if sep:
                 meta[k.strip()] = v.strip()
     meta.setdefault("id", Path(path).stem)
-    meta.setdefault("title", "(sans titre)")
+    meta.setdefault("title", "(untitled)")
     meta.setdefault("team", "-")
     meta["status"] = meta.get("status") if meta.get("status") in STATUSES else "backlog"
     meta["blocked"] = str(meta.get("blocked", "")).lower() == "true"
-    meta.setdefault("jira", "")
+    meta.setdefault("ref", meta.pop("jira", ""))      # `jira:` in older tickets is read as `ref`
     meta.setdefault("created", "")
     meta.setdefault("updated", "")
     meta.setdefault("by", "")
@@ -76,7 +76,7 @@ def serialize(meta: dict, body: str) -> str:
         v = meta.get(k, "")
         if k == "blocked":
             v = "true" if v else "false"
-        if k == "jira" and not v:
+        if k == "ref" and not v:
             continue
         lines.append(f"{k}: {_clean(v)}")
     for k, v in meta.items():                 # unknown keys (github:, linear:, …) survive round-trips
@@ -151,8 +151,8 @@ def load_all(shared: Path) -> list[dict]:
             meta, body = parse(p)
             out.append(to_dict(meta, body))
         except (OSError, ValueError):
-            out.append({"id": p.stem, "title": f"⚠ fichier illisible ({p.name})", "team": "-", "status": "backlog",
-                        "blocked": False, "jira": "", "created": "", "updated": "", "by": "",
+            out.append({"id": p.stem, "title": f"⚠ unreadable file ({p.name})", "team": "-", "status": "backlog",
+                        "blocked": False, "ref": "", "created": "", "updated": "", "by": "",
                         "description": "", "criteria": "", "log": [], "broken": True})
     return out
 
@@ -168,7 +168,7 @@ def to_dict(meta: dict, body: str) -> dict:
             "log": log_entries(body)}
 
 
-EDITABLE = {"title", "team", "status", "blocked", "jira", "description", "criteria",
+EDITABLE = {"title", "team", "status", "blocked", "ref", "description", "criteria",
             "scope", "verify", "decisions", "depends"}
 SECTIONS = {"description", "criteria", "scope", "verify", "decisions", "depends"}
 TRANSITIONS = {"backlog": {"todo"}, "todo": {"backlog", "doing"},
@@ -198,7 +198,7 @@ def _changes(meta, body, changes, actor, primary, teams=None):
     if unknown:
         raise ValueError(f"unknown fields: {sorted(unknown)}")
     if "team" in changes and teams is not None and changes["team"] not in {*teams, "-"}:
-        raise ValueError("unknown team")
+        raise ValueError(f"unknown team {changes['team']!r} (expected one of {', '.join(teams)} or -)")
     target = changes.get("status", meta["status"])
     if target != meta["status"] and target not in TRANSITIONS[meta["status"]]:
         raise ValueError(f"invalid transition {meta['status']} -> {target}")
@@ -215,17 +215,17 @@ def _changes(meta, body, changes, actor, primary, teams=None):
     return meta, _note(body, f"{actor}: {'; '.join(events)}") if events else body
 
 
-def create(shared: Path, title: str, *, team="-", status="backlog", jira="",
-           description="", criteria="", by="human", primary="gestion", teams=None, **mandate) -> dict:
+def create(shared: Path, title: str, *, team="-", status="backlog", ref="",
+           description="", criteria="", by="human", primary="manager", teams=None, **mandate) -> dict:
     _manager(by, primary)
     if status not in ("backlog", "todo"):
         raise ValueError("new tickets start in backlog or todo")
     if teams is not None and team not in {*teams, "-"}:
-        raise ValueError("unknown team")
+        raise ValueError(f"unknown team {team!r} (expected one of {', '.join(teams)} or -)")
     with lock(shared):
         tid = alloc_id(shared)
-        meta = {"id": tid, "title": _clean(title) or "(sans titre)", "team": team,
-                "status": status, "blocked": False, "jira": jira, "created": now(), "by": by}
+        meta = {"id": tid, "title": _clean(title) or "(untitled)", "team": team,
+                "status": status, "blocked": False, "ref": ref, "created": now(), "by": by}
         body = ""
         for key, value in {"description": description, "criteria": criteria, **mandate}.items():
             if key not in SECTIONS:
@@ -234,7 +234,7 @@ def create(shared: Path, title: str, *, team="-", status="backlog", jira="",
         return _save(shared, meta, _note(body, f"created by {by} ({status})"))
 
 
-def update(shared, tid, changes, *, actor="human", primary="gestion", teams=None):
+def update(shared, tid, changes, *, actor="human", primary="manager", teams=None):
     with lock(shared):
         meta, body = parse(path_of(shared, tid))
         previous = serialize(meta, body)
@@ -247,7 +247,7 @@ def update(shared, tid, changes, *, actor="human", primary="gestion", teams=None
 
 
 
-def append_log(shared, tid, text, *, actor="human", primary="gestion"):
+def append_log(shared, tid, text, *, actor="human", primary="manager"):
     with lock(shared):
         meta, body = parse(path_of(shared, tid))
         if actor not in ("human", primary, meta["team"]):
@@ -312,7 +312,7 @@ def _message_records(shared, sender, to, header, primary, event_id):
     return records
 
 
-def apply_message(shared, sender, to, header, *, primary="gestion", event_id=None, validate_only=False):
+def apply_message(shared, sender, to, header, *, primary="manager", event_id=None, validate_only=False):
     """Only the reference field changes tickets. Successful tool events are replay-safe."""
     with lock(shared):
         records = _message_records(shared, sender, to, header, primary, event_id)
@@ -332,6 +332,6 @@ def summary(shared: Path) -> str:
         by[t["status"]] = by.get(t["status"], 0) + 1
     head = "tasks: " + ", ".join(f"{by[s]} {s}" for s in STATUSES if s in by)
     rows = [f"{t['id']:4} [{t['team']}] {t['status']:7}{' ⛔' if t['blocked'] else '  '} {t['title'][:56]}"
-            + (f"  ({t['jira']})" if t["jira"] else "")
+            + (f"  ({t['ref']})" if t["ref"] else "")
             for t in ts if t["status"] != "done"]
     return head + ("\n  " + "\n  ".join(rows) if rows else "")

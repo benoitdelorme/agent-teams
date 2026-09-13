@@ -29,20 +29,20 @@ class BoardHTTP(Fixture):
                 return json.load(response)
         with urllib.request.urlopen(base, timeout=3) as page:
             html = page.read().decode()
-        self.assertIn('openModal', html)
+        self.assertIn('openTicket', html)
         for field in ('scope','verify','decisions','depends'):
-            self.assertIn('id="m-' + field + '"', html)
+            self.assertIn('id="t-' + field + '"', html)
         created = request('POST', '/api/tasks', {'title': 'HTTP audit'})
         tid = created['id']
         ticket = request('PATCH', '/api/tasks/' + tid, {'status': 'todo', 'team': 'backend',
             'scope': 'app.py', 'verify': 'python3 -m unittest', 'criteria': 'test passes'})
         self.assertEqual(ticket['scope'], 'app.py')
-        tasklib.apply_message(self.shared, 'gestion', 'backend', f'TASK {tid} | implement')
+        tasklib.apply_message(self.shared, 'manager', 'backend', f'TASK {tid} | implement')
         request('PATCH', '/api/tasks/' + tid, {'scope': 'another.py'})
         with self.assertRaises(urllib.error.HTTPError) as error:
             request('PATCH', '/api/tasks/' + tid, {'status': 'done'})
         error.exception.close()
-        tasklib.apply_message(self.shared, 'backend', 'gestion', f'DONE {tid} | verified')
+        tasklib.apply_message(self.shared, 'backend', 'manager', f'DONE {tid} | verified')
         request('POST', '/api/tasks/' + tid + '/comment', {'text': 'Human inspected result'})
         accepted = request('PATCH', '/api/tasks/' + tid, {'status': 'done'})
         self.assertEqual(accepted['status'], 'done')
@@ -53,5 +53,7 @@ class BoardHTTP(Fixture):
         state = request('GET', '/api/state')
         self.assertEqual(state['transitions']['doing'], ['todo', 'qa'])
         self.assertEqual(state['transitions']['qa'], ['doing', 'done'])
+        self.assertEqual(state['pending_notifications'], 1)
+        self.assertFalse(state['notify_available'])
         request('DELETE', '/api/tasks/' + tid)
         self.assertFalse(tasklib.path_of(self.shared, tid).exists())

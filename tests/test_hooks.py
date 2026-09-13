@@ -15,7 +15,7 @@ class Hooks(Fixture):
                 'tool_input': {'to': to, 'message': message}, **extra}
 
     def handle(self, event, phase):
-        return hooklib.handle(self.cfg['_path'], 'gestion', {**event, 'hook_event_name': phase})
+        return hooklib.handle(self.cfg['_path'], 'manager', {**event, 'hook_event_name': phase})
 
     def records(self):
         return [storage.read_json(path) for path in (self.root / '.state/messages').glob('*.json')]
@@ -25,7 +25,7 @@ class Hooks(Fixture):
                  'tool_input': {'to': 'worker-simple-42', 'message': 'Please inspect the failing test'}}
         result = subprocess.run([sys.executable, '-B', str(ROOT / 'bin/teams'), '_hook'],
             input=json.dumps(event), capture_output=True, text=True,
-            env={**os.environ, 'TEAMS_TEAM': 'gestion', 'TEAMS_CONFIG': str(self.cfg['_path'])})
+            env={**os.environ, 'TEAMS_TEAM': 'manager', 'TEAMS_CONFIG': str(self.cfg['_path'])})
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stdout), {})
         self.assertEqual(self.records(), [])
@@ -45,7 +45,7 @@ class Hooks(Fixture):
         event = self.event('TASK T999 | implement', hook_event_name='PreToolUse')
         result = subprocess.run([sys.executable, '-B', str(ROOT / 'bin/teams'), '_hook'],
             input=json.dumps(event), capture_output=True, text=True,
-            env={**os.environ, 'TEAMS_TEAM': 'gestion', 'TEAMS_CONFIG': str(self.cfg['_path'])})
+            env={**os.environ, 'TEAMS_TEAM': 'manager', 'TEAMS_CONFIG': str(self.cfg['_path'])})
         self.assertEqual(result.returncode, 2)
         self.assertIn('T999', result.stderr)
 
@@ -100,12 +100,12 @@ class Hooks(Fixture):
         old_run = hooklib.begin_run(self.root)
         tid = self.task()['id']
         event = self.event(f'TASK {tid} | implement', hook_event_name='PreToolUse')
-        hooklib.handle(self.cfg['_path'], 'gestion', event, old_run)
+        hooklib.handle(self.cfg['_path'], 'manager', event, old_run)
         new_run = hooklib.begin_run(self.root)
         self.assertNotEqual(old_run, new_run)
-        self.assertTrue(list((self.root / '.state/history').glob('*/sessions/gestion.json')))
+        self.assertTrue(list((self.root / '.state/history').glob('*/sessions/manager.json')))
         self.assertTrue(list((self.root / '.state/history').glob('*/messages/*.json')))
-        hooklib.handle(self.cfg['_path'], 'gestion', {**event, 'hook_event_name': 'PostToolUse'}, old_run)
+        hooklib.handle(self.cfg['_path'], 'manager', {**event, 'hook_event_name': 'PostToolUse'}, old_run)
         self.assertEqual(tasklib.load(self.shared, tid)['status'], 'todo')
-        hooklib.handle(self.cfg['_path'], 'gestion', {'hook_event_name': 'SessionStart', 'session_id': 'new'}, new_run)
-        self.assertEqual(storage.read_json(self.root / '.state/sessions/gestion.json')['sessions'], ['new'])
+        hooklib.handle(self.cfg['_path'], 'manager', {'hook_event_name': 'SessionStart', 'session_id': 'new'}, new_run)
+        self.assertEqual(storage.read_json(self.root / '.state/sessions/manager.json')['sessions'], ['new'])

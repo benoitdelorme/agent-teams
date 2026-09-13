@@ -3,8 +3,8 @@
 Goal: minimum tokens, zero ambiguity. Silence is the default. A message costs; only send when it changes what the recipient will do.
 
 ## Channel
-1. Primary: `SendMessage({to: "<team>", message})` — team names come from ROSTER. Confirm names once with `ListAgents` at start (match by prefix if suffixed).
-2. Fallback (only if SendMessage errors): `programa send --surface <surface> "<text>\n"` using surfaces from `shared/.roster.json`.
+1. Primary: `SendMessage({to: "<team>", message})` — `to` is exactly the ROSTER name (every session is started with `-n <team>`); confirm once with `ListAgents` at start.
+2. Fallback (only if SendMessage errors): `{{teams}} msg <team> "<text>"` types the line into that team's terminal. If that fails too, tell the human.
 Never use both for the same message.
 
 ## Message format — one message = one line header + optional body
@@ -17,29 +17,29 @@ Never use both for the same message.
 Types (the only ones allowed):
 | TYPE      | sender → recipient           | when                                             | reply expected     |
 |-----------|------------------------------|--------------------------------------------------|--------------------|
-| TASK      | gestion → team               | assign work. Body: acceptance criteria only.     | DONE or BLOCKED    |
-| DONE      | team → gestion               | task meets criteria. Body: changed paths, verify.| none               |
-| BLOCKED   | team → gestion               | can't proceed. Body: exact missing thing.        | TASK / ANSWER      |
+| TASK      | manager → team               | assign work. Body: none (criteria live in the ticket); at most an ordering note. | DONE or BLOCKED    |
+| DONE      | team → manager               | task meets criteria. Body: changed paths, verify.| none               |
+| BLOCKED   | team → manager               | can't proceed. Body: exact missing thing.        | TASK / ANSWER      |
 | ASK       | any → any                    | one precise question. Body: options if any.      | ANSWER             |
 | ANSWER    | any → any                    | reply to ASK. Body: the answer, nothing else.    | none               |
-| CONTRACT  | frontend ↔ backend           | API shape proposal/agreement. Body: pointer to `shared/CONTRACTS.md` section + 1-line diff summary. | ANSWER (`agree` / objection) |
-| STATUS    | gestion → any (rare)         | request state. Body: none.                       | one-line answer    |
+| CONTRACT  | team ↔ team                  | API shape proposal/agreement. Body: pointer to `SHARED_DIR/CONTRACTS.md` section + 1-line diff summary. | ANSWER (`agree` / objection) |
+| STATUS    | manager → any (rare)         | request state. Body: none.                       | one-line answer    |
 
 ## Hard rules
 - No greetings, no thanks, no "received", no recap of what the other said. Silence = ack.
-- Never paste code in a message. Point to `path:line` or a section of `shared/CONTRACTS.md`.
-- Never send the same info to two teams "for information". Send only to who acts on it. gestion learns via DONE/BLOCKED, not CC.
+- Never paste code in a message. Point to `path:line` or a section of `SHARED_DIR/CONTRACTS.md`.
+- Never send the same info to two teams "for information". Send only to who acts on it. manager learns via DONE/BLOCKED, not CC.
 - One message per state change. Batch: if 3 tasks finish together, one DONE listing T1,T2,T3.
 - Do not reply to DONE, ANSWER, or STATUS answers.
-- Detail lives in files, not messages: tasks in `SHARED_DIR/tasks/T<n>.md`, API shapes in `shared/CONTRACTS.md`. Update the file, then send the 1-line pointer.
+- Detail lives in files, not messages: tasks in `SHARED_DIR/tasks/T<n>.md`, API shapes in `SHARED_DIR/CONTRACTS.md`. Update the file, then send the 1-line pointer.
 - Messages whose header carries a `T<n>` ref are mirrored into that ticket's `## Log` (and TASK/DONE/BLOCKED update its status/flags) by successful PostToolUse hooks. Failed sends leave ticket state unchanged. A synchronization warning after a successful send requires checking the recorded event before retrying. Never send a message whose only purpose is a status update.
 - Do not poll. Replies arrive as new turns in your session; end your turn and wait. STATUS at most once per task, only if a DONE/BLOCKED is overdue.
-- Language: messages in English (denser). Talk to the human in French.
+- Language: messages between teams in English (denser). Talk to the human in {{language}}.
 
 ## Examples
 ```
-TASK T2 | POST /api/projects/{id}/archive, sets archived=1, 404 if missing
-criteria: endpoint + test; contract in shared/CONTRACTS.md#archive
+TASK T2 | POST /api/projects/{id}/archive — see tasks/T2.md
+after T1 (schema); contract goes to SHARED_DIR/CONTRACTS.md#archive
 ```
 ```
 DONE T2 | src/api/projects.*:140-152, tests/projects_test.*:31 — test suite green
