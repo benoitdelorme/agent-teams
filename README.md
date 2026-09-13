@@ -30,7 +30,7 @@ teams --help
 
 ```bash
 cd ~/code/my-project
-teams init                      # scans the project, writes ./.teams (teams.json, role prompts, .gitignore)
+teams init                      # analyses the project, proposes the teams, writes ./.teams once you say yes
 ```
 
 **3. Launch and talk to the manager.**
@@ -105,7 +105,9 @@ Every command is `teams <something>`, run from anywhere inside the project: the 
 
 ## Use it on your project
 
-`teams init` detects the applications under the project (frontend and backend manifests, two levels deep), creates one team per application plus the manager, and copies the matching role prompts so you can edit them. Pass repository paths to scan specific directories, `--language French` to have the leads talk to you in another language, `--dir` to name the instance directory (its parent is taken as the project root; only `.teams/` and `teams/` are found automatically, any other name needs `TEAMS_CONFIG`). Without any detected application it creates a single `dev` team on the project root.
+`teams init` sends one cheap model call (Sonnet 5, a few thousand tokens) a snapshot of the project: the directory tree, the manifests, the READMEs and the files that reveal how the parts connect (dev-server proxies, compose files, workspaces). The model proposes the teams with their directory, purpose, stack, verification commands and the interfaces between them, with the file that justifies each one. You see the proposal and confirm before anything is written; `--dry-run` only shows it, `--yes` skips the question. Each team gets the engine's role prompt for its kind plus a short section with what the analysis found.
+
+Without a model (`--no-ai`, or when `claude` is not available) the applications are detected from their manifests instead. Pass repository paths to analyse specific directories, `--language French` to have the leads talk to you in another language, `--dir` to name the instance directory (its parent is taken as the project root; only `.teams/` and `teams/` are found automatically, any other name needs `TEAMS_CONFIG`).
 
 Then:
 

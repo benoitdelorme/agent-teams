@@ -5,6 +5,7 @@
 First version with the engine / instance split.
 
 - The repository is the engine; `install.sh` symlinks `teams` onto your PATH. A project holds one instance directory (`.teams/` by default) with its own `teams.json`, role prompts, rules, tickets and state. `teams init` scaffolds it. Commands find the instance by walking up from the current directory; a vendored engine at `.teams/engine` takes over automatically.
+- `teams init` analyses the project with one cheap model call (tree, manifests, READMEs, proxy and compose configs), proposes the teams with their links and evidence, and asks before writing. `--dry-run`, `--yes`, `--no-ai` (manifest scan only), `--model`.
 - `agents/` is now `workers/`. Prompts and worker profiles resolve in layers: instance file first, engine default otherwise.
 - The config is found through `--config`, `$TEAMS_CONFIG`, or by walking up from the current directory.
 - Terminal drivers in `bin/terminal.py`: `programa` (unchanged behaviour), `tmux` (new), `manual` (commands printed). `terminal` in `teams.json` selects one; `auto` by default. The launcher and the board only hold opaque handles, recorded in `.state/terminal.json` (formerly `surfaces.json`). The protocol fallback is `teams msg <team>` instead of a Programa command, and the roster no longer lists terminal identifiers.

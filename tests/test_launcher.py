@@ -219,7 +219,7 @@ class Launcher(Fixture):
         launcher = self.launcher
         (self.repo / 'package.json').write_text(json.dumps({'dependencies': {'react': '19'}}))
         inst = self.root / 'teams'
-        launcher.cmd_init(SimpleNamespace(dir=str(inst), repo=[str(self.repo)], force=False, language='English'))
+        launcher.cmd_init(SimpleNamespace(dir=str(inst), repo=[str(self.repo)], force=False, language='English', no_ai=True, yes=True, dry_run=False, model='fake'))
         cfg = json.loads((inst / 'teams.json').read_text())
         self.assertEqual([t['name'] for t in cfg['teams']], ['manager', 'frontend'])
         self.assertEqual(cfg['teams'][1]['cwd'], '../app')
@@ -228,15 +228,119 @@ class Launcher(Fixture):
         self.assertFalse((inst / 'teams').exists())
         self.assertEqual(json.loads((inst / 'teams.json').read_text())['engine_version'], launcher.VERSION)
         with self.assertRaises(SystemExit):
-            launcher.cmd_init(SimpleNamespace(dir=str(inst), repo=[str(self.repo)], force=False, language='English'))
+            launcher.cmd_init(SimpleNamespace(dir=str(inst), repo=[str(self.repo)], force=False, language='English', no_ai=True, yes=True, dry_run=False, model='fake'))
 
     def test_init_without_any_app_creates_a_dev_team(self):
         launcher = self.launcher
         inst = self.root / 'empty' / '.teams'
         (self.root / 'empty').mkdir()
-        launcher.cmd_init(SimpleNamespace(dir=str(inst), repo=[], force=False, language='English'))
+        launcher.cmd_init(SimpleNamespace(dir=str(inst), repo=[], force=False, language='English', no_ai=True, yes=True, dry_run=False, model='fake'))
         cfg = json.loads((inst / 'teams.json').read_text())
         self.assertEqual([t['name'] for t in cfg['teams']], ['manager', 'dev'])
         self.assertEqual(cfg['teams'][1]['cwd'], '..')
         self.assertIn('# Role: DEV team', (inst / 'prompts/dev.md').read_text())
         self.assertEqual(cfg['terminal'], 'auto')
+
+    PROPOSAL = json.dumps({
+        "project": "A shop: web app and API",
+        "teams": [
+            {"name": "backend", "kind": "backend", "cwd": "api", "stack": "FastAPI, uv", "purpose": "Owns the API",
+             "scope": "Everything under api/, never the web app", "verify": ["uv run pytest"], "talks_to": ["frontend"],
+             "evidence": "web/vite.config.ts proxies /api to :8010 served by api/"},
+            {"name": "frontend", "kind": "frontend", "cwd": "web", "stack": "React, Vite, pnpm", "purpose": "Owns the web app",
+             "scope": "", "verify": ["pnpm build", "pnpm lint"], "talks_to": ["backend"], "evidence": "web/package.json"},
+            {"name": "manager", "kind": "other", "cwd": ".", "purpose": "must be ignored"},
+            {"name": "ops", "kind": "infra", "cwd": "../elsewhere", "purpose": "outside the project: dropped"},
+            {"name": "docs", "kind": "docs", "cwd": "docs", "purpose": "Keeps the handbook", "verify": [], "talks_to": ["ops", "frontend", "docs"]},
+        ],
+        "links": ["web/vite.config.ts → api/ on port 8010"],
+        "skipped": ["assets/: images only"],
+    })
+
+    def init_args(self, inst, **over):
+        base = dict(dir=str(inst), repo=[], force=False, language='English', no_ai=False, yes=True, dry_run=False, model='fake')
+        return SimpleNamespace(**{**base, **over})
+
+    def shop(self):
+        project = self.root / 'shop'
+        for d in ('api', 'web', 'docs', 'assets'):
+            (project / d).mkdir(parents=True)
+        (project / 'api' / 'pyproject.toml').write_text('[project]\nname = "api"\ndependencies = ["fastapi"]\n')
+        (project / 'web' / 'package.json').write_text(json.dumps({'dependencies': {'react': '19'}, 'scripts': {'build': 'vite build'}}))
+        (project / 'web' / 'vite.config.ts').write_text("export default { server: { proxy: { '/api': 'http://localhost:8010' } } }")
+        (project / 'web' / 'node_modules' / 'react').mkdir(parents=True)
+        (project / 'web' / 'node_modules' / 'react' / 'package.json').write_text('{}')
+        (project / 'docs' / 'handbook.md').write_text('# Handbook')
+        return project
+
+    def test_init_snapshot_shows_the_tree_and_the_linking_files_but_not_dependencies(self):
+        project = self.shop()
+        snap = self.launcher.snapshot_project([project])
+        self.assertIn('## TREE', snap)
+        self.assertIn('web/vite.config.ts', snap)
+        self.assertIn("proxy: { '/api'", snap)            # file content, not only its name
+        self.assertNotIn('node_modules', snap)
+
+    def test_init_uses_the_model_proposal_and_asks_nothing_with_yes(self):
+        launcher = self.launcher
+        project = self.shop()
+        inst = project / '.teams'
+        sent = {}
+        def fake_run(args, **kw):
+            sent['prompt'] = kw.get('input', '')
+            return subprocess.CompletedProcess(args, 0, self.PROPOSAL, '')
+        with patch.object(launcher.subprocess, 'run', side_effect=fake_run):
+            launcher.cmd_init(self.init_args(inst))
+        self.assertIn('## FILE shop/web/vite.config.ts', sent['prompt'])
+        cfg = json.loads((inst / 'teams.json').read_text())
+        self.assertEqual([t['name'] for t in cfg['teams']], ['manager', 'backend', 'frontend', 'docs'])
+        self.assertEqual({t['name']: t['cwd'] for t in cfg['teams']}, {'manager': '..', 'backend': '../api', 'frontend': '../web', 'docs': '../docs'})
+        self.assertEqual(cfg['teams'][1]['purpose'], 'Owns the API')
+        self.assertEqual(sorted(cfg['teams'][0]['add_dirs']), ['../api', '../docs', '../web'])
+        backend = (inst / 'prompts/backend.md').read_text()
+        self.assertIn('# Role: BACKEND team', backend)               # the engine's role for the kind
+        self.assertIn('## This project', backend)
+        self.assertIn('`uv run pytest`', backend)
+        self.assertIn('Interfaces with: frontend', backend)
+        docs = (inst / 'prompts/docs.md').read_text()
+        self.assertIn('# Role: DOCS team', docs)                     # no engine role for docs: the template
+        self.assertIn('Needs frontend for shared interfaces', docs)  # ops was dropped, docs is itself: both filtered out
+        self.assertTrue((inst / 'prompts/manager.md').is_file())
+
+    def test_init_falls_back_to_the_manifest_scan_when_the_model_fails(self):
+        launcher = self.launcher
+        project = self.shop()
+        inst = project / '.teams'
+        with patch.object(launcher.subprocess, 'run', return_value=subprocess.CompletedProcess([], 1, '', 'boom')):
+            launcher.cmd_init(self.init_args(inst))
+        cfg = json.loads((inst / 'teams.json').read_text())
+        self.assertEqual(sorted(t['name'] for t in cfg['teams']), ['backend', 'frontend', 'manager'])
+
+    def test_init_dry_run_shows_the_proposal_and_writes_nothing(self):
+        launcher = self.launcher
+        project = self.shop()
+        inst = project / '.teams'
+        import io, contextlib
+        out = io.StringIO()
+        with patch.object(launcher.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, self.PROPOSAL, '')), contextlib.redirect_stdout(out):
+            launcher.cmd_init(self.init_args(inst, dry_run=True))
+        self.assertIn('backend', out.getvalue())
+        self.assertIn('web/vite.config.ts → api/ on port 8010', out.getvalue())
+        self.assertFalse(inst.exists())
+
+    def test_init_refuses_to_guess_when_not_a_terminal_and_not_yes(self):
+        launcher = self.launcher
+        project = self.shop()
+        with patch.object(launcher.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, self.PROPOSAL, '')), \
+             patch.object(launcher.sys.stdin, 'isatty', return_value=False):
+            with self.assertRaises(SystemExit):
+                launcher.cmd_init(self.init_args(project / '.teams', yes=False))
+        self.assertFalse((project / '.teams').exists())
+
+    def test_parse_proposal_rejects_junk(self):
+        launcher = self.launcher
+        project = self.shop()
+        self.assertIsNone(launcher.parse_proposal('no json here', project))
+        self.assertIsNone(launcher.parse_proposal('{"teams": [{"name": "x", "cwd": "../.."}]}', project))
+        p = launcher.parse_proposal('```json\n{"teams": [{"name": "Web App!", "cwd": "web"}]}\n```', project)
+        self.assertEqual(p['teams'][0]['name'], 'web-app')
