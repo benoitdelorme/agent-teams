@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Board: the header brand and tab title now show the project name (new `project` config key, defaulting to the project directory name), so several boards from different projects are distinguishable.
+
 ## 0.1.0
 
 First version with the engine / instance split.

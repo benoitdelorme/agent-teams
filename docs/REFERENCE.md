@@ -54,6 +54,7 @@ Paths are relative to the file. Any `prompts/` or `workers/` file present in the
 | --- | --- | --- |
 | `engine_version` | written by `init` | `teams up` warns when the engine checkout reports another version (`VERSION` file). Other commands stay silent so agents never see the warning. |
 | `language` | `English` | Language the leads use with the human. Inter-team messages stay in English. |
+| `project` | project directory name | Display name of the project on the board; defaults to the project directory name. |
 | `shared_dir` | `shared` | Directory holding tickets, log, roster and optional PLAN.md / CONTRACTS.md. |
 | `permission_mode` | written as `yolo` by `init` | `yolo` (no prompts, `--dangerously-skip-permissions`), `acceptEdits`, `default` or `plan`. Absent: Claude's own default, which prompts. Overridable per team. |
 | `trust_dirs` | `true` | `up` marks every team directory as trusted in `~/.claude.json` so no dialog blocks a terminal. |
