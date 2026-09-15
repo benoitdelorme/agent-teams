@@ -71,6 +71,20 @@ class Launcher(Fixture):
         self.assertEqual([t for _, t in self.driver.sent], ['claude -n backend\n', 'claude -n manager\n'])
         self.assertEqual(self.driver.selected, ['win:2'])
 
+    def test_session_prefix_names_sessions_and_roster(self):
+        for t in self.cfg['teams']:
+            t.setdefault('runner', {'command': 'claude'})
+        self.cfg.setdefault('defaults', {})
+        self.assertEqual(self.launcher.session_name(self.cfg, 'backend'), 'backend')
+        self.cfg['session_prefix'] = 'demo'
+        self.assertEqual(self.launcher.session_name(self.cfg, 'backend'), 'demo-backend')
+        roster = self.launcher.roster_text(self.cfg, self.cfg['teams'][0])
+        self.assertIn('session=demo-backend', roster)
+        self.assertIn('session=demo-manager', roster)
+        self.assertIn('never the bare team name', roster)
+        del self.cfg['session_prefix']
+        self.assertNotIn('session=', self.launcher.roster_text(self.cfg, self.cfg['teams'][0]))
+
     def test_down_exits_and_closes_every_terminal(self):
         launcher = self.launcher
         storage.write_json(launcher.STATE, {'driver': 'fake', 'handles': {'manager': {'win': 'win:1'}, 'backend': {'win': 'win:2'}}})

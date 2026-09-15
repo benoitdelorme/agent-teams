@@ -208,11 +208,14 @@ def workers_text(cfg: dict, team: dict) -> str:
 
 def roster_text(cfg: dict, me: dict) -> str:
     lines = [f"# ROSTER  (you are: {me['name']})", f"SHARED_DIR: {cfg['shared_abs']}", ""]
+    if cfg.get("session_prefix"):
+        lines.insert(2, 'Address a team with SendMessage({to: "<session>"}) — the session name below, never the bare team name.')
     for t in cfg["teams"]:
         tag = " ← you" if t is me else ""
         brain = t["runner"].get("brain") or t.get("model", cfg["defaults"].get("model", "claude-fable-5-1"))
         stack = rules_stack(t["name"])
-        lines.append(f"- {t['name']}{' (primary)' if t.get('primary') else ''} [{brain}]: {t.get('purpose','')}  cwd={t['cwd_abs']}{tag}"
+        sess = f" session={session_name(cfg, t['name'])}" if cfg.get("session_prefix") else ""
+        lines.append(f"- {t['name']}{sess}{' (primary)' if t.get('primary') else ''} [{brain}]: {t.get('purpose','')}  cwd={t['cwd_abs']}{tag}"
                      + (f"\n    stack: {stack}" if stack else ""))
     return "\n".join(lines)
 
@@ -245,6 +248,13 @@ def teams_command(cfg: dict) -> str:
     return str(SELF)
 
 
+def session_name(cfg: dict, name: str) -> str:
+    """Claude session name for a team: `<session_prefix>-<team>` when a prefix is set (lets several
+    projects run their teams at once without name collisions), else the bare team name."""
+    p = cfg.get("session_prefix", "")
+    return f"{p}-{name}" if p else name
+
+
 def claude_cmd(cfg: dict, team: dict) -> list[str]:
     prompt_file = cfg['_root'] / ".state" / f"prompt-{team['name']}.md"
     prompt_file.parent.mkdir(exist_ok=True)
@@ -252,7 +262,7 @@ def claude_cmd(cfg: dict, team: dict) -> list[str]:
     agents_file = cfg['_root'] / '.state' / f"workers-{team['name']}.json"
     agents_file.write_text(build_agents_json(cfg, team))
     runner = team["runner"]
-    cmd = [runner.get("command", "claude"), "-n", team["name"],
+    cmd = [runner.get("command", "claude"), "-n", session_name(cfg, team["name"]),
            "--model", team.get("model", cfg["defaults"].get("model", "claude-fable-5-1")),
            "--append-system-prompt-file", str(prompt_file),
            "--agents", f"$(cat {shlex.quote(str(agents_file))})",
@@ -738,7 +748,7 @@ def driver_for(cfg: dict, state: dict | None = None) -> terminal.Driver:
 
 def write_roster_json(cfg: dict):
     data = {"shared_dir": str(cfg["shared_abs"]),
-            "teams": {t["name"]: {"cwd": str(t["cwd_abs"]), "primary": bool(t.get("primary")), "purpose": t.get("purpose", "")}
+            "teams": {t["name"]: {"cwd": str(t["cwd_abs"]), "primary": bool(t.get("primary")), "purpose": t.get("purpose", ""), "session": session_name(cfg, t["name"])}
                       for t in cfg["teams"]}}
     (cfg["shared_abs"] / ".roster.json").write_text(json.dumps(data, indent=2))
 

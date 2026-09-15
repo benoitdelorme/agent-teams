@@ -61,7 +61,7 @@ Paths are relative to the file. Any `prompts/` or `workers/` file present in the
 | `tmux_session` | `teams-<project dir>` | Name of the tmux session holding this instance's windows. |
 | `board` | `{"port": 0, "ref_base_url": ""}` | Port `0` lets the OS pick. `ref_base_url` is prefixed to a ticket's `ref` to make it a link on the board (`https://xxx.atlassian.net/browse/`, `https://github.com/org/repo/issues/`…). |
 | `shell_prompt_regex` | `(➜\|→\|❯\|\$\|%\|#) ` | Pattern of the shell prompt the launcher waits for before typing into a new terminal. |
-| `session_prefix` | empty | Prefix Claude adds to session names, used to match message recipients to team names. |
+| `session_prefix` | empty | Launch sessions as `<prefix>-<team>` instead of the bare team name, and advertise the session names in the ROSTER — set it (e.g. to the project name) to run several projects' teams at once without name collisions. Hooks recognise both forms. |
 | `prices_per_mtok` | none | `{ "<model>": { "in", "out", "cache_read", "cache_write" } }` in dollars per million tokens, for `teams cost`. |
 | `defaults` | see below | Values inherited by every team. |
 | `runners` | `{"claude": {"command": "claude"}}` | Named ways to start a lead. |
