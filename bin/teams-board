@@ -58,8 +58,15 @@ def plan_title() -> str:
     return ""
 
 
+def project_name() -> str:
+    """Display name of the project: teams.json's "project" key, else the name of the
+    project root directory (the parent of the instance directory)."""
+    return CTX["cfg"].get("project") or CTX["root"].parent.name
+
+
 def api_state() -> dict:
     return {"plan_title": plan_title(),
+            "project": project_name(),
             "ref_base_url": CTX["board"].get("ref_base_url", ""),
             "shared_dir": CTX["cfg"].get("shared_dir", "shared"),
             "teams": sessions_state(),
