@@ -30,6 +30,7 @@
   .brand b{font-size:14.5px;font-weight:650;letter-spacing:.1px}
   .brand span{color:var(--muted);font-size:13px;max-width:34vw;overflow:hidden;
               text-overflow:ellipsis;white-space:nowrap}
+  .brand .dim{color:var(--dim)}
   #search{flex:0 1 260px;margin-left:auto;background:var(--card);border:1px solid var(--border);
           border-radius:var(--r-sm);padding:5px 11px;font-size:13px;outline:none;color:var(--text)}
   #search::placeholder{color:var(--dim)}
@@ -169,7 +170,7 @@
 </head>
 <body>
 <header>
-  <div class="brand"><b>Board</b><span id="plan"></span></div>
+  <div class="brand"><b id="project"></b><span class="dim">Board</span><span id="plan"></span></div>
   <input id="search" type="text" placeholder="Filter tickets  ( / )" spellcheck="false">
   <div id="teams"></div>
   <span id="notifications" aria-live="polite"></span>
@@ -194,7 +195,7 @@ const HUES = ["#4dd0e1","#a78bfa","#f5b83d","#f06292","#81c784","#ffb74d","#64b5
 const $ = s => document.querySelector(s);
 
 let TASKS = new Map();          // id -> task
-let META  = {teams: [], ref_base_url: "", shared_dir: "shared", plan_title: "", transitions: {}};
+let META  = {teams: [], ref_base_url: "", shared_dir: "shared", plan_title: "", project: "", transitions: {}};
 let open_id = null;             // ticket shown on the ticket page
 let drag = null;                // {id, ghost, card, over}
 let renderQueued = false;
@@ -567,8 +568,9 @@ function renderHeader(){
   $("#notifications").title = META.notify_available
     ? "The queue will be delivered to the manager."
     : "The manager cannot be reached automatically right now. The queue is kept.";
+  $("#project").textContent = META.project || "";
   $("#plan").textContent = META.plan_title || "";
-  document.title = (open_id ? open_id + " — " : "") + (META.plan_title ? META.plan_title + " — " : "") + "Board";
+  document.title = (open_id ? open_id + " — " : "") + (META.project ? META.project + " — " : "") + "Board";
   $("#teams").innerHTML = META.teams.map(t =>
     `<div class="pill ${esc(t.status)}" title="${esc(t.purpose)} — ${esc(t.status)}${t.updated ? " (" + esc(rel(t.updated)) + ")" : ""}">
        <i></i>${esc(t.title || t.name)}</div>`).join("");

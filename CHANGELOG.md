@@ -13,6 +13,7 @@
 - With `warp`, a team's liveness comes from that pid file rather than from the last hook record, so `up --resume` restarts a lead that died in a tab that is still open.
 - Driver capabilities instead of driver names: `types_commands` and a `command` argument on `Driver.open`; the existing `attach_hint` carries what `teams up` adds once the teams are started. The launcher and the board branch only on those, and the run recording (`_run` and the pid helpers in `bin/terminal.py`) is reusable by any future terminal that cannot be typed into. `teams msg` refuses a driver that cannot type, and the board reports no delivery channel instead of retrying forever (notifications stay queued).
 - `programa` and `manual` are unchanged: same commands, same order, same state files, same output.
+- Board: the header brand and tab title now show the project name (new `project` config key, defaulting to the project directory name), so several boards from different projects are distinguishable.
 
 ## 0.1.0
 
