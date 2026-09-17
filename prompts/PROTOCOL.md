@@ -3,7 +3,7 @@
 Goal: minimum tokens, zero ambiguity. Silence is the default. A message costs; only send when it changes what the recipient will do.
 
 ## Channel
-1. Primary: `SendMessage({to: "<team>", message})` — `to` is exactly the ROSTER name (every session is started with `-n <team>`); confirm once with `ListAgents` at start.
+1. Primary: `SendMessage({to: "<team>", message})` — `to` is exactly the session name from ROSTER (bare team name, or `<session_prefix>-<team>` when the config sets a prefix — the ROSTER then lists `session=` per team); confirm once with `ListAgents` at start.
 2. Fallback (only if SendMessage errors): `{{teams}} msg <team> "<text>"` types the line into that team's terminal. If that fails too, tell the human.
 Never use both for the same message.
 

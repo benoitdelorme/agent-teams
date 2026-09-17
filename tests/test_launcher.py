@@ -5,7 +5,9 @@ import json, os, shutil, subprocess
 import storage
 import hooklib
 
-class Launcher(Fixture):
+class LauncherCase(Fixture):
+    """bin/teams loaded as a module, its instance paths under the fixture root, a fake driver."""
+
     def setUp(self):
         super().setUp()
         self.launcher = module('launcher_' + self._testMethodName, 'teams')
@@ -19,6 +21,8 @@ class Launcher(Fixture):
         patcher.start()
         self.addCleanup(patcher.stop)
 
+
+class Launcher(LauncherCase):
     def test_resume_uses_current_ids_and_starts_missing_teams_fresh(self):
         launcher = self.launcher
         self.driver.existing.update({'win:1', 'win:2'})
@@ -71,6 +75,20 @@ class Launcher(Fixture):
         self.assertEqual([t for _, t in self.driver.sent], ['claude -n backend\n', 'claude -n manager\n'])
         self.assertEqual(self.driver.selected, ['win:2'])
 
+    def test_session_prefix_names_sessions_and_roster(self):
+        for t in self.cfg['teams']:
+            t.setdefault('runner', {'command': 'claude'})
+        self.cfg.setdefault('defaults', {})
+        self.assertEqual(self.launcher.session_name(self.cfg, 'backend'), 'backend')
+        self.cfg['session_prefix'] = 'demo'
+        self.assertEqual(self.launcher.session_name(self.cfg, 'backend'), 'demo-backend')
+        roster = self.launcher.roster_text(self.cfg, self.cfg['teams'][0])
+        self.assertIn('session=demo-backend', roster)
+        self.assertIn('session=demo-manager', roster)
+        self.assertIn('never the bare team name', roster)
+        del self.cfg['session_prefix']
+        self.assertNotIn('session=', self.launcher.roster_text(self.cfg, self.cfg['teams'][0]))
+
     def test_down_exits_and_closes_every_terminal(self):
         launcher = self.launcher
         storage.write_json(launcher.STATE, {'driver': 'fake', 'handles': {'manager': {'win': 'win:1'}, 'backend': {'win': 'win:2'}}})
@@ -104,6 +122,34 @@ class Launcher(Fixture):
         self.driver.send = lambda handle, text: False
         with self.assertRaises(SystemExit):
             launcher.cmd_msg(self.cfg, SimpleNamespace(team='backend', text=['again']))
+
+    def test_relay_writes_each_live_team_state_into_its_own_terminal(self):
+        """What the leads emitted before anyone attached is lost: an attach replays it per terminal."""
+        launcher = self.launcher
+        ttys = {name: self.root / f'tty-{name}' for name in ('manager', 'backend')}
+        for path in ttys.values():
+            path.write_text('')
+        storage.write_json(launcher.STATE, {'driver': 'fake', 'handles': {
+            'manager': {'win': 'win:1'}, 'backend': {'win': 'win:2'}}})
+        storage.write_json(launcher.SESS / 'manager.json', {'session_id': 'm1', 'cwd': str(self.root), 'status': 'working'})
+        storage.write_json(launcher.SESS / 'backend.json', {'session_id': 'b1', 'cwd': str(self.repo), 'status': 'gone'})
+        self.driver.session_environ = lambda: {'TEAMS_HOST_TERM_PROGRAM': 'WarpTerminal',
+                                               'TEAMS_HOST_WARP_CLI_AGENT_PROTOCOL_VERSION': '1'}
+        self.driver.tty = lambda handle: str(ttys['manager' if handle['win'] == 'win:1' else 'backend'])
+        launcher.cmd_relay(self.cfg, SimpleNamespace())
+        written = ttys['manager'].read_text()
+        self.assertEqual(written.count('\x1bPtmux;'), 2)              # session_start, then the current state
+        self.assertIn('"event":"session_start"', written)
+        self.assertIn('"event":"prompt_submit"', written)
+        self.assertIn('"session_id":"m1"', written)
+        self.assertEqual(ttys['backend'].read_text(), '')              # gone: nothing to show
+        # a team whose terminal has no tty is skipped, and a missing device is not an error
+        ttys['manager'].write_text('')
+        self.driver.tty = lambda handle: None
+        launcher.cmd_relay(self.cfg, SimpleNamespace())
+        self.assertEqual(ttys['manager'].read_text(), '')
+        self.driver.tty = lambda handle: str(self.root / 'no-such-device')
+        launcher.cmd_relay(self.cfg, SimpleNamespace())                # writes a file here, never raises
 
     def test_status_reports_down_then_liveness_from_the_hooks(self):
         import io, contextlib
@@ -344,3 +390,89 @@ class Launcher(Fixture):
         self.assertIsNone(launcher.parse_proposal('{"teams": [{"name": "x", "cwd": "../.."}]}', project))
         p = launcher.parse_proposal('```json\n{"teams": [{"name": "Web App!", "cwd": "web"}]}\n```', project)
         self.assertEqual(p['teams'][0]['name'], 'web-app')
+
+
+class NonTypingDriver(LauncherCase):
+    """A terminal the launcher cannot type into (Warp): the command travels with the tab."""
+
+    def setUp(self):
+        super().setUp()
+        self.driver.types_commands = False
+        self.driver.name = 'warp'
+
+    def test_up_hands_the_run_command_to_the_tab_and_never_types(self):
+        import io, contextlib
+        launcher = self.launcher
+        self.driver.attach_hint = lambda: 'these terminals started themselves'
+        out = io.StringIO()
+        with patch.object(launcher, 'pretrust'), patch.object(launcher, 'check_rules_fresh'), \
+             patch.object(launcher, 'preflight_runners'), patch.object(launcher, 'start_board'), \
+             patch.object(launcher, 'claude_cmd', return_value=['claude']), contextlib.redirect_stdout(out):
+            launcher.cmd_up(self.cfg, SimpleNamespace(dry_run=False, resume=False))
+        self.assertEqual(self.driver.sent, [])                       # nothing typed: the terminal runs its own command
+        self.assertEqual([n for n, _ in self.driver.commands], ['backend', 'manager'])
+        for name, command in self.driver.commands:
+            self.assertIn(f'{launcher.SELF}', command)
+            self.assertIn(f'_run {name}', command)
+        self.assertIn('these terminals started themselves', out.getvalue())   # whatever the driver has to say, verbatim
+
+    def test_msg_refuses_a_terminal_it_cannot_type_into(self):
+        import io, contextlib
+        launcher = self.launcher
+        storage.write_json(launcher.STATE, {'driver': 'warp', 'handles': {'backend': {'win': 'win:2'}}})
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), self.assertRaises(SystemExit):
+            launcher.cmd_msg(self.cfg, SimpleNamespace(team='backend', text=['hello']))
+        self.assertIn('teams msg cannot type into a warp terminal', err.getvalue())
+        self.assertEqual(self.driver.sent, [])
+
+    def test_resume_gives_a_dead_team_a_fresh_tab_carrying_its_resume_id(self):
+        launcher = self.launcher
+        self.driver.existing.update({'win:1', 'win:2'})
+        storage.write_json(launcher.STATE, {'driver': 'warp', 'handles': {'manager': {'win': 'win:1'}, 'backend': {'win': 'win:2'}}})
+        storage.write_json(launcher.SESS / 'manager.json', {'session_id': 'recorded-id'})
+        with patch.object(launcher, 'process_alive', side_effect=lambda cfg, name: name == 'backend'), \
+             patch.object(launcher, 'claude_cmd', return_value=['claude']), patch.object(launcher, 'start_board'):
+            launcher.cmd_resume(self.cfg, self.cfg['teams'], self.cfg['teams'][0])
+        self.assertEqual(self.driver.sent, [])
+        self.assertEqual(self.driver.closed, ['win:1'])              # leftovers of the dead session go first
+        self.assertEqual([n for n, _ in self.driver.opened], ['manager'])
+        self.assertIn('--resume-id recorded-id', self.driver.commands[0][1])
+        self.assertEqual(storage.read_json(launcher.STATE)['handles']['manager'], {'win': 'win:1'})
+
+    def test_a_dead_tab_is_dead_whatever_the_hooks_last_recorded(self):
+        launcher = self.launcher
+        storage.write_json(launcher.STATE, {'driver': 'warp', 'handles': {'backend': {'win': 'win:2'}}})
+        storage.write_json(launcher.SESS / 'backend.json', {'session_id': 'x', 'status': 'idle'})
+        self.driver.existing.clear()                                 # its session is gone, the tab may not be
+        self.assertFalse(launcher.process_alive(self.cfg, 'backend'))
+        self.driver.existing.add('win:2')
+        self.assertTrue(launcher.process_alive(self.cfg, 'backend'))
+
+    def test_run_records_its_pid_then_execs_claude_with_the_workers_inlined(self):
+        launcher = self.launcher
+        cfg = json.loads((ROOT / 'examples/demo/.teams/teams.json').read_text())
+        for team in cfg['teams']:
+            team['cwd'] = '.'
+            team['add_dirs'] = []
+        storage.write_json(self.cfg['_path'], cfg)
+        parsed = launcher.load(self.cfg['_path'])
+        with patch.object(launcher.os, 'execvp') as execvp:
+            launcher.cmd_run(parsed, SimpleNamespace(team='backend', resume_id='sid-7'))
+        binary, argv = execvp.call_args.args
+        self.assertEqual(binary, 'claude')
+        self.assertEqual(argv[0], 'claude')
+        workers = (self.root / '.state/workers-backend.json').read_text()
+        self.assertEqual(argv[argv.index('--agents') + 1], workers)   # exec has no shell to expand $(cat …)
+        self.assertEqual(argv[-2:], ['--resume', 'sid-7'])
+        self.assertEqual(os.environ['TEAMS_TEAM'], 'backend')
+        self.assertEqual(os.environ['TEAMS_CONFIG'], str(parsed['_path']))
+        pid_file = parsed['_root'] / '.state/runs/backend.pid'
+        self.assertEqual(pid_file.read_text().splitlines()[0], str(os.getpid()))
+        self.assertTrue(pid_file.read_text().splitlines()[1].startswith(f'{os.getppid()} '))
+        self.assertIn('## run backend', (self.shared / 'LOG.md').read_text())
+        with patch.object(launcher.os, 'execvp') as execvp:
+            launcher.cmd_run(parsed, SimpleNamespace(team='backend', resume_id=None))
+        self.assertNotIn('--resume', execvp.call_args.args[1])
+        with self.assertRaises(SystemExit):
+            launcher.cmd_run(parsed, SimpleNamespace(team='nope', resume_id=None))

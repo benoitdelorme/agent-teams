@@ -57,3 +57,14 @@ class BoardHTTP(Fixture):
         self.assertFalse(state['notify_available'])
         request('DELETE', '/api/tasks/' + tid)
         self.assertFalse(tasklib.path_of(self.shared, tid).exists())
+
+    def test_project_name_defaults_to_dir_name_and_is_overridable(self):
+        board = module('board_project', 'teams-board')
+        instance = self.root / 'demo-project' / '.teams'
+        instance.mkdir(parents=True)
+        (instance / 'teams.json').write_text(json.dumps({'teams': []}))
+        board.load_ctx(instance)
+        self.assertEqual(board.api_state()['project'], 'demo-project')
+        (instance / 'teams.json').write_text(json.dumps({'teams': [], 'project': 'Demo Co'}))
+        board.load_ctx(instance)
+        self.assertEqual(board.api_state()['project'], 'Demo Co')

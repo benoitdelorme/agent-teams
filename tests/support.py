@@ -23,15 +23,16 @@ class FakeDriver(terminal.Driver):
 
     def __init__(self, cfg=None, root=None):
         super().__init__(cfg or {}, root or '.')
-        self.opened, self.sent, self.closed, self.selected = [], [], [], []
+        self.opened, self.sent, self.closed, self.selected, self.commands = [], [], [], [], []
         self.existing = set()
 
     def available(self):
         return True
 
-    def open(self, name, title, cwd, purpose=''):
+    def open(self, name, title, cwd, purpose='', command=None):
         h = {'win': f'win:{len(self.opened) + 1}'}
         self.opened.append((name, h))
+        self.commands.append((name, command))
         self.existing.add(h['win'])
         return h
 
