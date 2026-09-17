@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""teams — launch/manage a set of Claude Code team sessions (programa, tmux, or commands to run yourself).
+"""teams — launch/manage a set of Claude Code team sessions (programa, Warp, tmux, or commands to run yourself).
 
-  teams up [--dry-run] [--resume]       one terminal per team (programa workspace / tmux window), claude started in each, primary selected
+  teams up [--dry-run] [--resume]       one terminal per team (programa workspace / Warp tab / tmux window), claude started in each, primary selected
                                         --resume: re-attach to a running setup, restart dead sessions with exact --resume IDs
   teams status                          liveness per team, ticket summary, tail of shared/LOG.md
   teams cost                            token usage per team (lead vs workers, per model); $ if prices_per_mtok is set
@@ -20,7 +20,9 @@ default: teams.json, its role prompts, rules/, shared/, .state/). The instance i
 $TEAMS_CONFIG, or by walking up from the cwd (.teams/teams.json, teams/teams.json, teams.json). Any
 prompts/ or workers/ file present in the instance overrides the engine's. An instance that vendors
 its own engine (git submodule at .teams/engine) is run with that engine automatically.
-Terminals: `terminal` in teams.json = auto (default) | programa | tmux | manual — see bin/terminal.py.
+Terminals: `terminal` in teams.json = auto (default) | programa | warp | tmux | manual — see bin/terminal.py.
+A driver that cannot be typed into (warp today) is handed `teams _run <team>` when it opens the
+terminal: that hidden subcommand records its pid and execs claude in the same process.
 """
 import argparse, json, os, re, shlex, shutil, signal, subprocess, sys, textwrap, time
 from datetime import datetime
@@ -29,6 +31,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import tasklib
 import hooklib
+import hostterm
 import storage
 import terminal
 
@@ -255,17 +258,28 @@ def session_name(cfg: dict, name: str) -> str:
     return f"{p}-{name}" if p else name
 
 
-def claude_cmd(cfg: dict, team: dict) -> list[str]:
-    prompt_file = cfg['_root'] / ".state" / f"prompt-{team['name']}.md"
+def state_files(cfg: dict, team: dict) -> tuple[Path, Path]:
+    """Generated system prompt and worker catalogue of one team."""
+    d = cfg['_root'] / '.state'
+    return d / f"prompt-{team['name']}.md", d / f"workers-{team['name']}.json"
+
+
+def claude_argv(cfg: dict, team: dict, resume_id: str | None = None) -> tuple[dict, list[str]]:
+    """Environment + exec-able argv of a team's lead, and the side effect of writing its
+    .state/prompt-<team>.md and .state/workers-<team>.json.
+
+    The workers JSON is inlined: `_run` execs without a shell, so `$(cat …)` would stay literal.
+    claude_cmd() swaps it back for the shell form used by the drivers that type their command."""
+    prompt_file, agents_file = state_files(cfg, team)
     prompt_file.parent.mkdir(exist_ok=True)
     prompt_file.write_text(system_prompt(cfg, team))
-    agents_file = cfg['_root'] / '.state' / f"workers-{team['name']}.json"
-    agents_file.write_text(build_agents_json(cfg, team))
+    agents_json = build_agents_json(cfg, team)
+    agents_file.write_text(agents_json)
     runner = team["runner"]
     cmd = [runner.get("command", "claude"), "-n", session_name(cfg, team["name"]),
            "--model", team.get("model", cfg["defaults"].get("model", "claude-fable-5-1")),
            "--append-system-prompt-file", str(prompt_file),
-           "--agents", f"$(cat {shlex.quote(str(agents_file))})",
+           "--agents", agents_json,
            "--add-dir", str(cfg["shared_abs"])]
     for d in [*cfg["defaults"].get("add_dirs", []), *team.get("add_dirs", [])]:
         cmd += ["--add-dir", str((cfg["_root"] / d).resolve())]
@@ -278,7 +292,62 @@ def claude_cmd(cfg: dict, team: dict) -> list[str]:
     for flag in runner.get("drop_flags", []):          # runners that set their own model/effort
         while flag in cmd:
             i = cmd.index(flag); del cmd[i:i + 2]
-    return ['env', f"TEAMS_TEAM={team['name']}", f"TEAMS_CONFIG={cfg['_path']}", *cmd]
+    if resume_id:
+        cmd += ["--resume", resume_id]
+    return {"TEAMS_TEAM": team["name"], "TEAMS_CONFIG": str(cfg["_path"])}, cmd
+
+
+def claude_cmd(cfg: dict, team: dict) -> list[str]:
+    """argv for a shell line: the workers JSON is too big to type, so it is passed as `$(cat …)`
+    — only valid through shell_line(), which leaves that word unquoted for the shell."""
+    env, cmd = claude_argv(cfg, team)
+    _, agents_file = state_files(cfg, team)
+    if "--agents" in cmd:                              # a runner may have dropped the flag
+        cmd[cmd.index("--agents") + 1] = f"$(cat {shlex.quote(str(agents_file))})"
+    return ['env', *(f"{k}={v}" for k, v in env.items()), *cmd]
+
+
+def run_line(cfg: dict, team: dict, resume_id: str | None = None) -> str:
+    """Shell line a terminal that cannot be typed into is given when it opens: back into this CLI,
+    which records the run and execs the lead in the same process."""
+    argv = [str(SELF), "--config", str(cfg["_path"]), "_run", team["name"]]
+    if resume_id:
+        argv += ["--resume-id", resume_id]
+    return shell_line(argv)
+
+
+def cmd_run(cfg: dict, a):
+    """Hidden: what a terminal that cannot be typed into runs. Records its pid — such a terminal
+    answers no query, so that file is the only handle on the session — then BECOMES the lead
+    (same pid), which keeps it findable by `status`, `up --resume` and `down`."""
+    team = next((t for t in cfg["teams"] if t["name"] == a.team), None)
+    if team is None:
+        die(f"unknown team {a.team} (teams: {', '.join(t['name'] for t in cfg['teams'])})")
+    env, argv = claude_argv(cfg, team, a.resume_id)
+    terminal.record_run(cfg["_root"], team["name"])
+    with open(cfg["shared_abs"] / "LOG.md", "a") as fh:
+        fh.write(f"## run {team['name']} {datetime.now():%Y-%m-%d %H:%M}\n")
+    os.environ.update(env)
+    os.execvp(argv[0], argv)
+
+
+def cmd_relay(cfg: dict, a):
+    """Hidden: what the multiplexer runs when a client attaches. Passthrough only reaches a client
+    that is already there, so everything the leads emitted before the attach was lost: write each
+    live team's state into its own terminal, where it takes the same road as a live hook."""
+    state = load_state()
+    drv = driver_for(cfg, state)
+    environ = drv.session_environ() if hasattr(drv, 'session_environ') else os.environ
+    for name in state.get("handles", {}):
+        tty = drv.tty(state["handles"][name])
+        sequence = hostterm.replay_sequence(session_info(name), environ, VERSION) if tty else None
+        if not sequence:
+            continue
+        try:
+            with open(tty, "w") as terminal_out:
+                terminal_out.write(sequence)
+        except OSError:
+            pass                                      # the pane went away between the two calls: nothing to show
 
 
 def hook_settings_json(cfg: dict, team: dict) -> str:
@@ -287,8 +356,11 @@ def hook_settings_json(cfg: dict, team: dict) -> str:
             f"TEAMS_RUN={shlex.quote(hooklib.run_id(cfg['_root']) or '')} python3 {shlex.quote(str(SELF))} _hook")
     def entry(matcher=''):
         return [{"matcher": matcher, "hooks": [{"type": "command", "command": hook, "timeout": 5}]}]
+    # Notification and PermissionRequest carry no team state; they are here so a lead's blocked and
+    # idle moments reach the terminal hosting it (bin/hostterm.py), which only sees what a hook emits.
     return json.dumps({"hooks": {
         "SessionStart": entry(), "UserPromptSubmit": entry(), "Stop": entry(), "SessionEnd": entry(),
+        "Notification": entry(), "PermissionRequest": entry(),
         "PreToolUse": entry('SendMessage'), "PostToolUse": entry('SendMessage'),
         "PostToolUseFailure": entry('SendMessage'),
     }})
@@ -301,7 +373,11 @@ def cmd_hook():
         warning = hooklib.handle(Path(os.environ.get('TEAMS_CONFIG') or find_config()),
                                  os.environ.get('TEAMS_TEAM', '?'), event,
                                  os.environ.get('TEAMS_RUN') or None)
-        print(json.dumps({'systemMessage': warning} if warning else {}))
+        out = {'systemMessage': warning} if warning else {}
+        sequence = hostterm.terminal_sequence(event, engine_version=VERSION)
+        if sequence:                                  # inside tmux: hand the host terminal its own status update
+            out['terminalSequence'] = sequence
+        print(json.dumps(out))
     except (OSError, ValueError, KeyError, StopIteration) as exc:
         if event.get('hook_event_name') == 'PreToolUse':
             print(f'teams: {exc}', file=sys.stderr)
@@ -816,10 +892,16 @@ def cmd_up(cfg: dict, a):
     (cfg["shared_abs"] / "LOG.md").touch()
     with open(cfg["shared_abs"] / "LOG.md", "a") as fh:
         fh.write(f"\n## up {datetime.now():%Y-%m-%d %H:%M}\n")
-    # 1) one terminal per team, all recorded before any claude starts
+    if not drv.types_commands:               # its terminals run their command as they open, so the run id,
+        hooklib.begin_run(cfg["_root"])      # the roster and the generated prompts must all exist beforehand
+        write_roster_json(cfg)
+        for t in ordered:
+            claude_cmd(cfg, t)               # side effect only: .state/prompt-<team>.md + workers-<team>.json
+    # 1) one terminal per team, all recorded before any claude starts (`command` is what a terminal
+    #    that cannot be typed into runs by itself; the others ignore it and are typed into in step 2)
     handles = {}
     for t in ordered:
-        h = drv.open(t["name"], t.get("title", t["name"]), t["cwd_abs"], t.get("purpose", ""))
+        h = drv.open(t["name"], t.get("title", t["name"]), t["cwd_abs"], t.get("purpose", ""), command=run_line(cfg, t))
         if not h:
             for opened in handles.values():          # leave nothing behind that `down` cannot see
                 drv.close(opened)
@@ -827,15 +909,17 @@ def cmd_up(cfg: dict, a):
         handles[t["name"]] = h
         print(f"[{t['name']}] {drv.describe(h)}")
     save_state({"driver": drv.name, "handles": handles, "started_at": datetime.now().isoformat(timespec="seconds")})
-    write_roster_json(cfg)
-    hooklib.begin_run(cfg["_root"])
+    if drv.types_commands:
+        write_roster_json(cfg)
+        hooklib.begin_run(cfg["_root"])
     # 2) launch claude in each terminal (after its shell prompt is up)
     for t in ordered:
         drv.wait_ready(handles[t["name"]])
-        if not drv.send(handles[t["name"]], shell_line(claude_cmd(cfg, t)) + "\n"):
+        if drv.types_commands and not drv.send(handles[t["name"]], shell_line(claude_cmd(cfg, t)) + "\n"):
             die(f"{drv.name}: could not type into {t['name']}'s terminal")
     start_board(cfg)
     drv.select(handles[primary["name"]])
+    drv.title(primary.get("title", primary["name"]))     # the terminal you attach in is named after the manager
     hint = drv.attach_hint()
     print(f"\n{primary['name']} is selected - talk to it there. `teams down` closes everything." + (f"\n{hint}" if hint else ""))
 
@@ -852,10 +936,14 @@ def process_alive(cfg: dict, name: str) -> bool:
     """Alive = a claude process runs on the team's terminal tty (robust to the terminal rewriting argv / --continue)."""
     st = load_state()
     h = st.get("handles", {}).get(name)
-    tty = driver_for(cfg, st).tty(h) if h else None
+    drv = driver_for(cfg, st) if h else None
+    tty = drv.tty(h) if h else None
     if tty:
         r = subprocess.run(["ps", "-t", tty, "-o", "command="], capture_output=True, text=True)
         return any("/claude" in l or l.startswith("claude") for l in r.stdout.splitlines())
+    if drv and not drv.types_commands:
+        return drv.exists(h)          # the handle IS the session (warp): no tty means the lead is gone, whatever
+                                      # the hooks last recorded — otherwise `up --resume` would never restart it
     return session_info(name).get("status") in ("idle", "working")     # no tty (manual driver): trust the hooks
 
 
@@ -905,6 +993,7 @@ def start_board(cfg: dict, port: int | None = None):
     st = board_state()
     if board_alive(st):
         print(f"board → {st.get('url')} (already running)")
+        driver_for(cfg).show(f"board {st.get('url')}")
         return
     BOARD_STATE.parent.mkdir(exist_ok=True)
     BOARD_STATE.unlink(missing_ok=True)
@@ -928,6 +1017,7 @@ def start_board(cfg: dict, port: int | None = None):
         st = board_state()
         if st.get("url") and board_alive(st):
             print(f"board → {st['url']}")
+            driver_for(cfg).show(f"board {st['url']}")
             return
     print("board: failed to start — see the board tab next to the manager (or .state/board.log)")
 
@@ -1015,40 +1105,69 @@ def cmd_status(cfg: dict, a):
         print("\nLOG.md (last 12):\n  " + "\n  ".join(lines[-12:]))
 
 
+def resumable_session(name: str) -> str | None:
+    """The session id `--resume` can load: a lead that never received a prompt has no transcript on
+    disk, and `claude --resume` then exits at once ("No conversation found") — start it fresh instead."""
+    si = session_info(name)
+    sid, transcript = si.get('session_id'), si.get('transcript_path')
+    if sid and transcript and not os.path.isfile(transcript):
+        print(f"[{name}] no transcript on disk for {sid[:8]} — starting a fresh session")
+        return None
+    return sid
+
+
 def cmd_resume(cfg: dict, ordered: list, primary: dict):
-    """Re-attach to an existing `up`: recreate missing terminals, restart dead sessions with exact --resume IDs."""
+    """Re-attach to an existing `up`: recreate missing terminals, restart dead sessions with exact
+    --resume IDs. A terminal that cannot be typed into is not reusable once its session died — the
+    command lives in the tab config — so each dead team gets a fresh tab carrying its resume id."""
     st = load_state()
     if not st:
         die("nothing to resume (no state) — run `teams up`")
     drv = driver_for(cfg, st)
     handles = st.get("handles", {})
-    for t in ordered:
-        n = t["name"]
-        if not handles.get(n) or not drv.exists(handles[n]):
-            h = drv.open(n, t.get("title", n), t["cwd_abs"], t.get("purpose", ""))
-            if not h:
-                die(f"{drv.name}: could not open a terminal for {n}")
-            handles[n] = h
-            print(f"[{n}] terminal recreated {drv.describe(h)}")
-    save_state({**st, "driver": drv.name, "handles": handles})
-    write_roster_json(cfg)
+    if drv.types_commands:
+        for t in ordered:
+            n = t["name"]
+            if not handles.get(n) or not drv.exists(handles[n]):
+                h = drv.open(n, t.get("title", n), t["cwd_abs"], t.get("purpose", ""))
+                if not h:
+                    die(f"{drv.name}: could not open a terminal for {n}")
+                handles[n] = h
+                print(f"[{n}] terminal recreated {drv.describe(h)}")
+        save_state({**st, "driver": drv.name, "handles": handles})
+        write_roster_json(cfg)
+    else:
+        write_roster_json(cfg)       # every roster is written before a terminal that starts itself opens
     for t in ordered:
         n = t["name"]
         if process_alive(cfg, n):
             print(f"[{n}] alive — untouched")
             continue
-        cmd = claude_cmd(cfg, t)
-        sid = session_info(n).get('session_id')
-        if sid:
-            cmd += ['--resume', sid]
-        drv.wait_ready(handles[n])
-        if not drv.send(handles[n], shell_line(cmd) + "\n"):
-            die(f"{drv.name}: could not type into {n}'s terminal")
+        if drv.types_commands:
+            cmd = claude_cmd(cfg, t)
+            sid = resumable_session(n)
+            if sid:
+                cmd += ['--resume', sid]
+            drv.wait_ready(handles[n])
+            if not drv.send(handles[n], shell_line(cmd) + "\n"):
+                die(f"{drv.name}: could not type into {n}'s terminal")
+        else:
+            sid = resumable_session(n)
+            if handles.get(n):
+                drv.close(handles[n])                # kill what is left and drop the dead terminal
+            claude_cmd(cfg, t)                       # refresh the files the new terminal reads at once
+            h = drv.open(n, t.get("title", n), t["cwd_abs"], t.get("purpose", ""), command=run_line(cfg, t, sid))
+            if not h:
+                die(f"{drv.name}: could not open a terminal for {n}")
+            handles[n] = h
+            save_state({**st, "driver": drv.name, "handles": handles})
+            drv.wait_ready(h)
         print(f"[{n}] restarted with --resume {sid}" if sid else f"[{n}] started a fresh session (no recorded id)")
     with open(cfg["shared_abs"] / "LOG.md", "a") as fh:
         fh.write(f"\n## resume {datetime.now():%Y-%m-%d %H:%M}\n")
     start_board(cfg)
     drv.select(handles[primary["name"]])
+    drv.title(primary.get("title", primary["name"]))
 
 
 def usage_of(path: Path) -> dict:
@@ -1110,10 +1229,14 @@ def cmd_cost(cfg: dict, a):
 
 def cmd_msg(cfg: dict, a):
     st = load_state()
+    drv = driver_for(cfg, st)
+    if not drv.types_commands:
+        die(f"teams msg cannot type into a {drv.name} terminal — type into the tab yourself, "
+            "or let the sessions use SendMessage")
     h = st.get("handles", {}).get(a.team)
     if not h:
         die(f"no terminal recorded for {a.team} (run `teams up` first)")
-    if not driver_for(cfg, st).send(h, " ".join(a.text) + "\n"):
+    if not drv.send(h, " ".join(a.text) + "\n"):
         die(f"could not type into {a.team}'s terminal")
 
 
@@ -1185,8 +1308,12 @@ def main():
     x = tsub.add_parser("show"); x.add_argument("id")
     s = sub.add_parser("board"); s.add_argument("--port", type=int)
     sub.add_parser("down")
+    s = sub.add_parser("_run")                           # hidden (see the metavar below): a terminal starts itself with it
+    s.add_argument("team"); s.add_argument("--resume-id", default=None)
+    sub.add_parser("_relay")                             # hidden: the multiplexer runs it when a client attaches
     s = sub.add_parser("cmd"); s.add_argument("team")
     s = sub.add_parser("add"); s.add_argument("name"); s.add_argument("--cwd", required=True, help="the team's directory (relative to your shell)"); s.add_argument("--purpose")
+    sub.metavar = "{" + ",".join(n for n in sub.choices if not n.startswith("_")) + "}"   # _run stays out of --help
     a = p.parse_args()
     if a.cmd == "init":
         return cmd_init(a)
@@ -1200,7 +1327,8 @@ def main():
         return cmd_add(a.config, a)
     cfg = load(a.config)
     {"up": cmd_up, "status": cmd_status, "cost": cmd_cost, "learn": cmd_learn, "msg": cmd_msg, "down": cmd_down,
-     "cmd": cmd_cmd, "task": cmd_task, "board": cmd_board}[a.cmd](cfg, a)
+     "cmd": cmd_cmd, "task": cmd_task, "board": cmd_board, "_run": cmd_run,
+     "_relay": cmd_relay}[a.cmd](cfg, a)
 
 
 if __name__ == "__main__":

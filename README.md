@@ -10,7 +10,7 @@ Run several Claude Code sessions as coordinated teams on one project. A manager 
 
 ## Quick start
 
-You need **Python 3.10 or newer**, an authenticated **Claude Code** CLI, and a terminal multiplexer: **[Programa](https://github.com/darkroomengineering/programa)** or **tmux**. Without either, `teams up` prints the commands to run by hand.
+You need **Python 3.10 or newer**, an authenticated **Claude Code** CLI, and a terminal that can open one session per team: **[Programa](https://github.com/darkroomengineering/programa)**, **[Warp](https://www.warp.dev)** or **tmux**. Without any of them, `teams up` prints the commands to run by hand.
 
 Claude Code's agent-team messaging is experimental: enable it once in `~/.claude/settings.json`.
 
@@ -137,12 +137,13 @@ Each team lives in its own terminal. The launcher picks the terminal driver auto
 | Driver | When | What `teams up` does |
 | --- | --- | --- |
 | `programa` | you run `teams up` inside Programa | One named workspace per team, the board in a tab beside the manager, the manager's workspace selected. |
-| `tmux` | tmux is installed | One detached session per project (`teams-<project>`), one window per team, one for the board. `teams up` prints how to attach. |
-| `manual` | neither is available | Prints the exact command to run in each terminal and starts the board detached; the board cannot wake the manager and `teams msg` is unavailable. |
+| `tmux` | tmux is installed | One detached session per project (`teams-<project>`), one window per team, one for the board. `teams up` prints how to attach. Inside Warp, the leads relay their status out of tmux, so that single tab shows the Claude icon and state, including what happened before you attached. |
+| `warp` | you run `teams up` inside Warp without tmux | One real tab per team in the active window, each running its own Claude session, the manager's tab focused. Every tab gets its own Claude icon in Warp's sidebar; the board runs detached. |
+| `manual` | none of them is available | Prints the exact command to run in each terminal and starts the board detached; the board cannot wake the manager and `teams msg` is unavailable. |
 
 `teams up --dry-run` prints the commands with any driver and starts nothing.
 
-`teams status`, `teams msg`, `teams down` and the board reuse the driver recorded by `teams up`. Programa and tmux behave the same from the agents' point of view.
+`teams status`, `teams msg`, `teams down` and the board reuse the driver recorded by `teams up`. Programa and tmux behave the same from the agents' point of view. A terminal that draws agent status normally never sees a session running inside tmux, so each lead's hooks re-emit it through tmux passthrough: in Warp, the tab you attached from shows the Claude icon and the current state. Warp has no way to be typed into from outside, so with the `warp` driver each tab is handed its command when it opens: `teams msg` and board wake-ups are unavailable there, and the teams talk to each other with `SendMessage` as usual.
 
 ## From request to verified result
 

@@ -109,3 +109,44 @@ class Hooks(Fixture):
         self.assertEqual(tasklib.load(self.shared, tid)['status'], 'todo')
         hooklib.handle(self.cfg['_path'], 'manager', {'hook_event_name': 'SessionStart', 'session_id': 'new'}, new_run)
         self.assertEqual(storage.read_json(self.root / '.state/sessions/manager.json')['sessions'], ['new'])
+
+
+class Relayed(Fixture):
+    """The hooks the host terminal needs (Notification, PermissionRequest) carry no team state."""
+
+    def run_hook(self, event, **env):
+        return subprocess.run([sys.executable, '-B', str(ROOT / 'bin/teams'), '_hook'],
+                              input=json.dumps(event), capture_output=True, text=True,
+                              env={**os.environ, 'TEAMS_TEAM': 'manager',
+                                   'TEAMS_CONFIG': str(self.cfg['_path']), **env})
+
+    def test_events_the_launcher_does_not_know_are_recorded_but_change_nothing(self):
+        for name in ('Notification', 'PermissionRequest'):
+            self.assertIsNone(hooklib.handle(self.cfg['_path'], 'manager',
+                                             {'hook_event_name': name, 'session_id': 's1'}))
+        session = storage.read_json(self.root / '.state/sessions/manager.json')
+        self.assertEqual(session['status'], '?')            # liveness is untouched by a relay-only event
+        self.assertEqual(session['sessions'], ['s1'])
+
+    def test_hook_output_carries_the_host_sequence_next_to_a_warning(self):
+        warp = {'TMUX': '/tmp/tmux-501/default,1,0', 'TERM_PROGRAM': 'WarpTerminal',
+                'WARP_CLI_AGENT_PROTOCOL_VERSION': '1'}
+        plain = self.run_hook({'hook_event_name': 'SessionStart', 'session_id': 's1', 'cwd': str(self.repo)}, **warp)
+        self.assertEqual(plain.returncode, 0, plain.stderr)
+        sequence = json.loads(plain.stdout)['terminalSequence']
+        self.assertTrue(sequence.startswith('\x1bPtmux;\x1b\x1b]777;notify;warp://cli-agent;'), repr(sequence[:40]))
+        self.assertIn('"event":"session_start"', sequence)
+        self.assertIn('"plugin_version":"agent-teams ', sequence)
+        self.assertNotIn('systemMessage', json.loads(plain.stdout))
+        # an event that both warns and has something to relay keeps the two side by side
+        both = self.run_hook({'hook_event_name': 'PostToolUse', 'session_id': 's1', 'cwd': str(self.repo),
+                              'tool_name': 'SendMessage',
+                              'tool_input': {'to': 'backend', 'message': 'DONE T1 | finished'}}, **warp)
+        out = json.loads(both.stdout)
+        self.assertIn('ticket synchronization failed', out['systemMessage'])
+        self.assertIn('"event":"tool_complete"', out['terminalSequence'])
+
+    def test_outside_tmux_the_hook_output_is_what_it_always_was(self):
+        result = self.run_hook({'hook_event_name': 'SessionStart', 'session_id': 's1'},
+                               TMUX='', TERM_PROGRAM='WarpTerminal')
+        self.assertEqual(json.loads(result.stdout), {})      # the host's own plugin already has this event

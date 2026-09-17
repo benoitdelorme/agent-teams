@@ -82,14 +82,19 @@ def _primary_terminal():
         return None, None
 
 
+def _can_wake(drv, handle):
+    """A driver that cannot type into its terminals (warp) is not a delivery channel: say so in the
+    header instead of failing on every retry. Pending notifications stay queued for the human."""
+    return bool(handle and drv and drv.available() and getattr(drv, 'types_commands', True))
+
+
 def notification_available():
-    drv, h = _primary_terminal()
-    return bool(h and drv.available())
+    return _can_wake(*_primary_terminal())
 
 
 def _send_primary(text):
     drv, h = _primary_terminal()
-    if not h or not drv.available():
+    if not _can_wake(drv, h):
         return False
     return drv.send(h, text + '\n')
 
