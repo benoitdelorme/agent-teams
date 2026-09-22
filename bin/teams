@@ -210,7 +210,7 @@ def roster_text(cfg: dict, me: dict) -> str:
     lines = [f"# ROSTER  (you are: {me['name']})", f"SHARED_DIR: {cfg['shared_abs']}", ""]
     for t in cfg["teams"]:
         tag = " ← you" if t is me else ""
-        brain = t["runner"].get("brain") or t.get("model", cfg["defaults"].get("model", "claude-fable-5-1"))
+        brain = t["runner"].get("brain") or t.get("model", cfg["defaults"].get("model", "claude-opus-5-5"))
         stack = rules_stack(t["name"])
         lines.append(f"- {t['name']}{' (primary)' if t.get('primary') else ''} [{brain}]: {t.get('purpose','')}  cwd={t['cwd_abs']}{tag}"
                      + (f"\n    stack: {stack}" if stack else ""))
@@ -253,7 +253,7 @@ def claude_cmd(cfg: dict, team: dict) -> list[str]:
     agents_file.write_text(build_agents_json(cfg, team))
     runner = team["runner"]
     cmd = [runner.get("command", "claude"), "-n", team["name"],
-           "--model", team.get("model", cfg["defaults"].get("model", "claude-fable-5-1")),
+           "--model", team.get("model", cfg["defaults"].get("model", "claude-opus-5-5")),
            "--append-system-prompt-file", str(prompt_file),
            "--agents", f"$(cat {shlex.quote(str(agents_file))})",
            "--add-dir", str(cfg["shared_abs"])]
@@ -692,8 +692,8 @@ def write_instance(inst: Path, project: Path, root: Path, proposal: dict, a):
            "board": {"port": 0, "ref_base_url": ""},
            "shell_prompt_regex": "(➜|→|❯|\\$|%|#) ",
            "runners": {"claude": {"command": "claude"}},
-           "defaults": {"model": "claude-fable-5-1", "runner": "claude", "add_dirs": [],
-                        "workers": {"worker-simple": {"model": "claude-sonnet-5"}, "worker-complex": {"model": "claude-opus-5"}}},
+           "defaults": {"model": "claude-opus-5-5", "runner": "claude", "add_dirs": [],
+                        "workers": {"worker-simple": {"model": "claude-sonnet-5"}, "worker-complex": {"model": "claude-opus-5-5"}}},
            "teams": teams}
     # skeleton: template files + one role prompt per team, copied so the user can edit them
     for src in (ENGINE / "template").rglob("*"):
