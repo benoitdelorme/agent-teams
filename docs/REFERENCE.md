@@ -71,7 +71,7 @@ Paths are relative to the file. Any `prompts/` or `workers/` file present in the
 
 | Key | Meaning |
 | --- | --- |
-| `model` | Lead model. `claude-fable-5-1` by default. |
+| `model` | Lead model. `claude-opus-5-5` by default. |
 | `runner` | Runner name for leads. |
 | `add_dirs` | Extra directories every lead may access. |
 | `workers` | The worker catalogue: `"<name>": { model, description?, vars?, file? }`, or `"<name>": "<model>"` as a shortcut. `<name>` is the file `workers/<name>.md`. |

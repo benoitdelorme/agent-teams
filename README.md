@@ -74,9 +74,9 @@ A **team** is a continuing area of responsibility. A **worker** is a helper for 
 
 | Assignment | Default model | Best fit |
 | --- | --- | --- |
-| Team lead | Fable 5.1 | Planning, decisions, delegation and verification. |
+| Team lead | Opus 5.5 | Planning, decisions, delegation and verification. |
 | `worker-simple` | Sonnet 5 | Precise, limited tasks such as a component, test, small fix or documentation change. |
-| `worker-complex` | Opus 5 | Investigation, refactoring, migrations and work requiring local design decisions. |
+| `worker-complex` | Opus 5.5 | Investigation, refactoring, migrations and work requiring local design decisions. |
 
 These assignments are configurable globally and per team. Leads choose the least expensive worker suited to the task and escalate when the work requires it. Independent assignments run in parallel.
 

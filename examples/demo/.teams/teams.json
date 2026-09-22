@@ -20,7 +20,7 @@
     }
   },
   "defaults": {
-    "model": "claude-fable-5-1",
+    "model": "claude-opus-5-5",
     "runner": "claude",
     "add_dirs": [],
     "workers": {
@@ -28,7 +28,7 @@
         "model": "claude-sonnet-5"
       },
       "worker-complex": {
-        "model": "claude-opus-5"
+        "model": "claude-opus-5-5"
       }
     }
   },
