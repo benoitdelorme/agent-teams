@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.2.0
+
+Remote instances: the teams run on another machine, you watch and drive them from this one.
+
+- `teams link <host>:<path>` points a local directory at an instance living on another machine: it checks over ssh that the instance answers, then writes `.teams/remote.json`. Commands typed anywhere under that directory act over there. `--remote <host>:<path>` and `$TEAMS_REMOTE` name a target without a file.
+- `teams up` starts the teams on the server, in tmux, then opens one local view per team through your own terminal driver: a Programa workspace, a tmux window, or a printed command. `teams attach` opens the missing views again without touching the teams. `teams down` stops the teams over there, then closes the views. Closing a view never stops a team.
+- A view reconnects by itself when the connection drops or this machine wakes up; a detach or stopped teams end it. The board is forwarded to the same port on `127.0.0.1` here, with the same reconnection.
+- Every other command (`status`, `task`, `msg`, `cost`, `learn`, `board`, `cmd`, `add`, `up --dry-run`) is relayed over ssh as it is, through the remote user's login shell. Every word sent to a shell, over there or here, is put between single quotes, so it arrives as typed whatever the shell: zsh, for one, expands a bare word starting with `=`.
+- `teams status --json` prints one line describing the running instance for programs: driver, terminal handles, liveness, board address, engine version.
+- New files: `bin/remote.py` in the engine; `remote.json` and `.state/views.json` in an instance directory. `remote.json` belongs to one machine, and the instance `.gitignore` written by `init` now ignores it.
+- Upgrading from 0.1.0: nothing changes for an instance without a `remote.json`. Add the line `remote.json` to an existing instance's `.gitignore` by hand. `teams up` reports that the instance was created for engine 0.1.0 until you set `engine_version` to `0.2.0` in its `teams.json`. A server must run this version too: an older engine there does not know `status --json`, and `teams link` says so.
+
 ## 0.1.0
 
 First version with the engine / instance split.

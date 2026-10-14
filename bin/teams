@@ -3,7 +3,7 @@
 
   teams up [--dry-run] [--resume]       one terminal per team (programa workspace / tmux window), claude started in each, primary selected
                                         --resume: re-attach to a running setup, restart dead sessions with exact --resume IDs
-  teams status                          liveness per team, ticket summary, tail of shared/LOG.md
+  teams status [--json]                 liveness per team, ticket summary, tail of shared/LOG.md; --json: one line for programs
   teams cost                            token usage per team (lead vs workers, per model); $ if prices_per_mtok is set
   teams learn [team|all] [--force] [--dry-run] [--model m]   MANUAL: scan a team's repo once, one cheap LLM call → rules/<team>.md (cached by fingerprint)
   teams init [--dir .teams] [--yes] [--dry-run] [--no-ai] [repo...]   analyse the project with a cheap model, propose the teams, create the instance
@@ -13,6 +13,8 @@
   teams down                            /exit every team, close their terminals, stop the board
   teams add <name> --cwd <dir> [--purpose "..."]   register a new team + prompt stub
   teams cmd <team>                      print the exact `claude` command for a team
+  teams link <host>:<path> [--dir .teams]   point this directory at an instance on another machine (bin/remote.py)
+  teams attach                          remote instance: open the local views of its teams again
 
 Engine vs instance: this checkout is the ENGINE (code, default prompts, workers, board UI); put
 bin/teams on your PATH once (see install.sh). A project holds one INSTANCE directory (.teams/ by
@@ -21,6 +23,8 @@ $TEAMS_CONFIG, or by walking up from the cwd (.teams/teams.json, teams/teams.jso
 prompts/ or workers/ file present in the instance overrides the engine's. An instance that vendors
 its own engine (git submodule at .teams/engine) is run with that engine automatically.
 Terminals: `terminal` in teams.json = auto (default) | programa | tmux | manual — see bin/terminal.py.
+Remote: `--remote host:path`, $TEAMS_REMOTE or a remote.json found walking up runs the command on
+that machine over ssh; `up`, `attach` and `down` also open and close one local view per team — see bin/remote.py.
 """
 import argparse, json, os, re, shlex, shutil, signal, subprocess, sys, textwrap, time
 from datetime import datetime
@@ -31,6 +35,7 @@ import tasklib
 import hooklib
 import storage
 import terminal
+import remote
 
 ENGINE = Path(__file__).resolve().parent.parent        # this checkout: code + default prompts/workers
 SELF = Path(__file__).resolve()
@@ -978,7 +983,23 @@ def cmd_task(cfg: dict, a):
         print(p.read_text(), end="")
 
 
+def status_json(cfg: dict) -> dict:
+    """The running instance for another program (`teams status --json`): driver, handles, liveness, board."""
+    st, bst = load_state(), board_state()
+    teams = []
+    for t in cfg["teams"]:
+        alive = bool(st) and process_alive(cfg, t["name"])
+        teams.append({"name": t["name"], "title": t.get("title", t["name"]), "primary": bool(t.get("primary")),
+                      "purpose": t.get("purpose", ""), "handle": st.get("handles", {}).get(t["name"]),
+                      "status": session_info(t["name"]).get("status", "?") if alive else ("DEAD" if st else "down")})
+    return {"up": bool(st), "driver": st.get("driver"), "started_at": st.get("started_at"), "engine": VERSION,
+            "teams": teams, "board": bst.get("url") if board_alive(bst) else None}
+
+
 def cmd_status(cfg: dict, a):
+    if getattr(a, "json", False):
+        print(json.dumps(status_json(cfg), ensure_ascii=False))
+        return
     st = load_state()
     if not st:
         print("teams: down (no state). `teams up` to start.")
@@ -1150,11 +1171,13 @@ def cmd_add(cfg_path: Path, a):
 def main():
     if len(sys.argv) > 1 and sys.argv[1] == "_hook":
         return cmd_hook()
-    p = argparse.ArgumentParser(prog="teams", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    # allow_abbrev=False: a `--rem host:path` argparse would accept is not the `--remote` stripped before relaying
+    p = argparse.ArgumentParser(prog="teams", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter, allow_abbrev=False)
     p.add_argument("--config", type=Path, default=None, help="instance teams.json (default: $TEAMS_CONFIG or walk up from cwd)")
+    p.add_argument("--remote", metavar="HOST:PATH", default=None, help="run the command on the instance of a project on another machine, over ssh (default: $TEAMS_REMOTE, or a remote.json found walking up)")
     sub = p.add_subparsers(dest="cmd", required=True)
     s = sub.add_parser("up"); s.add_argument("--dry-run", action="store_true"); s.add_argument("--resume", action="store_true")
-    sub.add_parser("status")
+    s = sub.add_parser("status"); s.add_argument("--json", action="store_true", help="one line of JSON describing the running instance, for programs")
     sub.add_parser("cost")
     s = sub.add_parser("learn"); s.add_argument("team", nargs="?", default="all"); s.add_argument("--model", default="claude-sonnet-5"); s.add_argument("--force", action="store_true"); s.add_argument("--dry-run", action="store_true")
     s = sub.add_parser("init"); s.add_argument("repo", nargs="*", help="directories to analyse (default: the project, parent of --dir)")
@@ -1177,7 +1200,21 @@ def main():
     sub.add_parser("down")
     s = sub.add_parser("cmd"); s.add_argument("team")
     s = sub.add_parser("add"); s.add_argument("name"); s.add_argument("--cwd", required=True, help="the team's directory (relative to your shell)"); s.add_argument("--purpose")
+    s = sub.add_parser("link"); s.add_argument("target", metavar="HOST:PATH", help="the project on the other machine, e.g. sky-a:~/work/project")
+    s.add_argument("--dir", default=".teams", help="local directory receiving remote.json (default: ./.teams)")
+    sub.add_parser("attach")
     a = p.parse_args()
+    if a.cmd == "link":
+        return remote.link(a.target, a.dir)
+    if a.remote and a.config:
+        die("--remote and --config are exclusive")
+    target = remote.parse_target(a.remote) if a.remote else None
+    if not target and a.config is None and not os.environ.get("TEAMS_CONFIG") and a.cmd != "init":
+        target = remote.find(Path.cwd().resolve(), CONFIG_CANDIDATES)
+    if target:
+        sys.exit(remote.main(target, a, remote.strip_option(sys.argv[1:], "--remote")))
+    if a.cmd == "attach":
+        die("attach opens the views of a remote instance — `teams link <host>:<path>` first")
     if a.cmd == "init":
         return cmd_init(a)
     if a.config is None:

@@ -4,7 +4,7 @@
 
 Run several Claude Code sessions as coordinated teams on one project. A manager plans with you, assigns tickets and verifies delivery; specialized teams (backend, frontend, whatever your project needs) implement through cheap workers. A live board and shared ticket files keep the work visible from the first idea to the final check. Messages between teams are one line each, so coordination costs almost no tokens.
 
-[Quick start](#quick-start) · [Demo](#try-the-demo) · [How it works](#how-it-works) · [Your project](#use-it-on-your-project) · [Terminals](#terminals) · [Follow a ticket](#from-request-to-verified-result) · [Commands](#everyday-commands) · [Reference](docs/REFERENCE.md)
+[Quick start](#quick-start) · [Demo](#try-the-demo) · [How it works](#how-it-works) · [Your project](#use-it-on-your-project) · [Terminals](#terminals) · [Another machine](#run-the-teams-on-another-machine) · [Follow a ticket](#from-request-to-verified-result) · [Commands](#everyday-commands) · [Reference](docs/REFERENCE.md)
 
 ---
 
@@ -144,6 +144,31 @@ Each team lives in its own terminal. The launcher picks the terminal driver auto
 
 `teams status`, `teams msg`, `teams down` and the board reuse the driver recorded by `teams up`. Programa and tmux behave the same from the agents' point of view.
 
+When the teams run [on another machine](#run-the-teams-on-another-machine), the server side uses the `tmux` driver and this table describes your **views**: one workspace or window per team here, each attached over ssh to its team over there.
+
+## Run the teams on another machine
+
+The teams can live on a server while you stay at your own terminal. The Claude sessions, the repository, the hooks and the board run over there, inside tmux, and survive this machine sleeping or losing the network. Here you get one **view** per team: a terminal attached over ssh to that team's session.
+
+```bash
+cd ~/code/my-project                      # any local directory: a clone, or a folder kept only for this
+teams link my-server:~/code/my-project    # checks over ssh that the instance answers, writes ./.teams/remote.json
+teams up                                  # starts the teams on my-server, opens one view per team here
+```
+
+From anywhere under that directory, the commands you already know act on the server:
+
+| Command | What happens |
+| --- | --- |
+| `teams up` | `teams up` over there, then one local view per team with the manager's in front, and the board forwarded to the same port on `127.0.0.1` here. |
+| `teams attach` | Opens the views that are missing (after a reboot, a closed window, a long sleep) without touching the teams. |
+| `teams down` | Stops the teams over there, then closes the views and the board forward. |
+| anything else | `teams status`, `teams task …`, `teams msg …`, `teams cost` and the others run over there and print here. |
+
+A view reconnects by itself when the connection drops. Closing a view, or detaching from it, never stops a team: `teams attach` brings it back on the same running session.
+
+The server needs tmux, this engine (0.2.0 or later) with `teams` on its login shell's PATH, an authenticated Claude Code and an instance created there with `teams init`. This machine needs ssh access to it with a key or an agent. One machine can drive several servers and projects, one linked directory each. The [reference](docs/REFERENCE.md#remote-instances) covers `remote.json`, the prerequisites in detail and the limits.
+
 ## From request to verified result
 
 There are two ways to introduce work:
@@ -234,6 +259,8 @@ Run these from anywhere inside the project.
 | Generate repository guidance | `teams learn all` |
 | Refresh one team's guidance | `teams learn frontend --force` |
 | Register a new team | `teams add qa --cwd qa` |
+| Drive teams that run on another machine | `teams link my-server:~/code/my-project` |
+| Reopen the views of teams running on another machine | `teams attach` |
 
 The cost command reports token usage from the current run's recorded transcripts. With `prices_per_mtok` configured, it also shows approximate costs.
 
@@ -245,20 +272,20 @@ The cost command reports token usage from the current run's recorded transcripts
 
 **Delivery and synchronization are tracked separately.** If a message is sent but its ticket update fails, the event and error are recorded under `.teams/.state/messages/` for inspection. Resolve that discrepancy before resending the assignment.
 
-Automated checks cover ticket concurrency, message routing and replay, session lifecycle, terminal drivers, board notifications, HTTP behavior and permitted UI transitions:
+Automated checks cover ticket concurrency, message routing and replay, session lifecycle, terminal drivers, remote instances, board notifications, HTTP behavior and permitted UI transitions:
 
 ```bash
 python3 -B -m unittest discover -s tests -v
 node --test tests/board-ui.test.cjs
 ```
 
-Claude calls and terminal interactions are simulated in the fixtures. A real end-to-end run additionally exercises model access, terminal delivery and the agents' actual handling of the work.
+Claude calls, ssh connections and terminal interactions are simulated in the fixtures. A real end-to-end run additionally exercises model access, terminal delivery and the agents' actual handling of the work.
 
 ## Find your way around
 
 | Location | Purpose |
 | --- | --- |
-| [bin/](bin/) | Launcher, ticket operations, message hooks, terminal drivers, shared storage and board server. |
+| [bin/](bin/) | Launcher, ticket operations, message hooks, terminal drivers, remote instances, shared storage and board server. |
 | [prompts/](prompts/) | Shared coordination rules, the protocol and the default team roles. |
 | [workers/](workers/) | Default worker profiles. |
 | [template/](template/) | Files copied into a new instance by `teams init`. |

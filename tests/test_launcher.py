@@ -1,7 +1,7 @@
 from support import Fixture, FakeDriver, module, ROOT
 from types import SimpleNamespace
 from unittest.mock import patch
-import json, os, shutil, subprocess
+import json, os, shutil, subprocess, sys
 import storage
 import hooklib
 
@@ -120,6 +120,70 @@ class Launcher(Fixture):
         lines = out.getvalue().splitlines()
         self.assertTrue(any(l.startswith('  backend') and 'working' in l for l in lines), lines)
         self.assertTrue(any(l.startswith('  manager') and 'DEAD' in l for l in lines), lines)   # no hook record → dead
+
+    def json_status(self):
+        """Run `status --json` in-process; exactly one stdout line, parsed."""
+        import io, contextlib
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.launcher.cmd_status(self.cfg, SimpleNamespace(json=True))
+        lines = out.getvalue().splitlines()
+        self.assertEqual(len(lines), 1, lines)
+        return json.loads(lines[0])
+
+    def test_status_json_reports_a_down_instance(self):
+        data = self.json_status()
+        self.assertIs(data['up'], False)
+        self.assertIsNone(data['driver'])
+        self.assertIsNone(data['started_at'])
+        self.assertIsNone(data['board'])
+        self.assertEqual(data['engine'], self.launcher.VERSION)
+        self.assertEqual([(t['name'], t['title'], t['primary'], t['purpose'], t['handle'], t['status']) for t in data['teams']],
+                         [('manager', 'manager', True, '', None, 'down'), ('backend', 'backend', False, '', None, 'down')])
+
+    def test_status_json_reports_handles_liveness_and_the_board(self):
+        launcher = self.launcher
+        storage.write_json(launcher.STATE, {'driver': 'tmux', 'started_at': '2026-10-09T12:00:00', 'handles': {
+            'manager': {'session': 'teams-x', 'window': '@1'}, 'backend': {'session': 'teams-x', 'window': '@2'}}})
+        storage.write_json(launcher.SESS / 'backend.json', {'status': 'working'})
+        storage.write_json(launcher.BOARD_STATE, {'url': 'http://127.0.0.1:4321', 'pid': 1})
+        with patch.object(launcher, 'process_alive', side_effect=lambda cfg, name: name == 'backend'), \
+             patch.object(launcher, 'board_alive', return_value=True):
+            data = self.json_status()
+        self.assertIs(data['up'], True)
+        self.assertEqual((data['driver'], data['started_at']), ('tmux', '2026-10-09T12:00:00'))
+        teams = {t['name']: t for t in data['teams']}
+        self.assertEqual(teams['backend']['handle'], {'session': 'teams-x', 'window': '@2'})
+        self.assertEqual(teams['backend']['status'], 'working')
+        self.assertEqual(teams['manager']['status'], 'DEAD')              # up, but no claude on its terminal
+        self.assertEqual(data['board'], 'http://127.0.0.1:4321')
+
+    def test_status_json_hides_a_dead_board_and_reports_an_unknown_hook_status(self):
+        launcher = self.launcher
+        self.cfg['teams'][1].update(title='Backend', purpose='server side')
+        storage.write_json(launcher.STATE, {'driver': 'manual', 'handles': {}, 'started_at': 'now'})
+        storage.write_json(launcher.BOARD_STATE, {'url': 'http://127.0.0.1:4321', 'pid': 1})
+        with patch.object(launcher, 'process_alive', return_value=True), \
+             patch.object(launcher, 'board_alive', return_value=False):
+            data = self.json_status()
+        backend = next(t for t in data['teams'] if t['name'] == 'backend')
+        self.assertEqual((backend['title'], backend['purpose'], backend['handle'], backend['status']),
+                         ('Backend', 'server side', None, '?'))       # alive, no hook record yet
+        self.assertIsNone(data['board'])
+
+    def test_status_json_flag_on_the_command_line(self):
+        inst = self.root / 'cli'
+        (inst / 'app').mkdir(parents=True)
+        storage.write_json(inst / 'teams.json', {'teams': [{'name': 'manager', 'primary': True, 'cwd': '.'},
+                                                           {'name': 'backend', 'cwd': 'app'}]})
+        r = subprocess.run([sys.executable, '-B', str(ROOT / 'bin' / 'teams'), '--config', str(inst / 'teams.json'),
+                            'status', '--json'], capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        lines = r.stdout.splitlines()
+        self.assertEqual(len(lines), 1, lines)
+        data = json.loads(lines[0])
+        self.assertIs(data['up'], False)
+        self.assertEqual([t['name'] for t in data['teams']], ['manager', 'backend'])
 
     def test_config_discovery_walks_up_and_honours_the_environment(self):
         launcher = self.launcher

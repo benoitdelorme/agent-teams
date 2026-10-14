@@ -17,11 +17,15 @@ Paths below are relative to the instance unless stated otherwise.
 
 Every command runs as `teams <command>` from anywhere inside the project. The instance is resolved in this order:
 
-1. `teams --config <file> <command>` (the option goes before the command)
-2. `$TEAMS_CONFIG`
-3. walking up from the current directory: `.teams/teams.json`, then `teams/teams.json`, then `teams.json`
+1. `teams --remote <host>:<path> <command>`: the instance of that project on another machine (see [Remote instances](#remote-instances)). Refused together with `--config`, and when abbreviated: write `--remote` in full.
+2. `teams --config <file> <command>` (both options go before the command)
+3. `$TEAMS_CONFIG`
+4. `$TEAMS_REMOTE`, a `<host>:<path>` target
+5. walking up from the current directory. At each level, `.teams/remote.json` or `teams/remote.json` makes the instance remote; otherwise `.teams/teams.json`, then `teams/teams.json`, then `teams.json` makes it local. The nearest level holding one of them decides, and a `remote.json` beside a `teams.json` wins.
 
-Claude sessions started by `teams up` receive `TEAMS_CONFIG` and `TEAMS_TEAM` in their environment, so the agents run the same commands without any flag.
+`teams init` is sent to another machine by `--remote` only, never by `$TEAMS_REMOTE` or by a `remote.json` found above; `teams link` always runs here.
+
+Claude sessions started by `teams up` receive `TEAMS_CONFIG` and `TEAMS_TEAM` in their environment, so the agents run the same commands without any flag, and never leave the machine they run on.
 
 If the instance contains `engine/bin/teams` (a vendored engine, typically a git submodule), the global `teams` command hands over to it. This pins an engine version for one project without changing anything else.
 
@@ -32,7 +36,7 @@ If the instance contains `engine/bin/teams` (a vendored engine, typically a git 
 | `teams init [--dir .teams] [--model m] [--no-ai] [-y] [--dry-run] [--language L] [--force] [repo...]` | Create an instance. The project root is the parent of `--dir`. A snapshot of it (or of the given repositories) goes to one model call (`--model`, Sonnet 5 by default, no tools, no session): tree three levels deep, manifests, READMEs, `CLAUDE.md`, compose and dev-server configs, capped at about 12k tokens. The answer is a proposal of one to six teams with directory, purpose, stack, verification commands, interfaces and evidence, validated (directories must exist inside the project, names must be unique) and shown to you; `--dry-run` stops there, `--yes` accepts without asking, a non-terminal without `--yes` refuses. `--no-ai`, or a failed call, falls back to detecting frontend and backend manifests two levels deep (a single `dev` team when nothing is recognised). Writes `teams.json`, the template files and one role prompt per team: the engine's role for its kind with a `## This project` section, or the filled template for other kinds. Only `.teams/` and `teams/` are discovered automatically; another `--dir` needs `TEAMS_CONFIG`. |
 | `teams up [--dry-run] [--resume]` | One terminal per team through the selected driver, Claude started in each, board started, manager selected. `--dry-run` prints the commands and writes the generated prompts without starting anything. `--resume` re-attaches to a running setup, recreates missing terminals and restarts dead sessions with their recorded session id. With the `manual` driver: prints the commands to run yourself and starts the board detached. |
 | `teams down` | `/exit` every team, close their terminals, stop the board. |
-| `teams status` | Liveness per team, ticket summary, tail of `shared/LOG.md`. |
+| `teams status [--json]` | Liveness per team, ticket summary, tail of `shared/LOG.md`. `--json` prints one line instead, for programs: whether the teams are up, the driver, the start time, the engine version, each team's terminal handle and status, the board address. |
 | `teams cost` | Token usage of the current run per team, lead versus workers, per model. Dollars when `prices_per_mtok` is set. |
 | `teams task new "<title>" [--team t] [--status s] [--ref PROJ-123] [--desc ...] [--criteria ...] [--scope ...] [--verify ...] [--decisions ...] [--depends ...]` | Create a ticket. Prints its id. Default status `backlog`. |
 | `teams task set T7 key=value ...` | Change `title`, `team`, `status`, `blocked`, `ref`, `description`, `criteria`, `scope`, `verify`, `decisions`, `depends`. Status transitions are validated. |
@@ -43,6 +47,10 @@ If the instance contains `engine/bin/teams` (a vendored engine, typically a git 
 | `teams board [--port N]` | Start the board alone. |
 | `teams msg <team> <text...>` | Type text into a team's terminal through the driver. Fallback channel; it does not run the message hooks. |
 | `teams cmd <team>` | Print the exact `claude` command generated for a team. |
+| `teams link <host>:<path> [--dir .teams]` | Point the current directory at an instance on another machine: check over ssh that it answers, then write `<dir>/remote.json` and print the teams found there. An existing target is replaced and named. See [Remote instances](#remote-instances). |
+| `teams attach` | Remote instances only: open the local views that are missing, forward the board, select the manager's view. The teams are not touched. |
+
+`--remote <host>:<path>`, before the command, runs it on another machine without a `remote.json`.
 
 ## Configuration: `teams.json`
 
@@ -163,6 +171,47 @@ Hooks mirror recognized messages after the send succeeds: `TASK T7` sets `doing`
 - The board server runs where the driver puts it (see above). With the `manual` driver the board works but cannot wake the manager.
 - A notification delivered right before a crash can be delivered twice; the manager checks the ticket before dispatching.
 
+## Remote instances
+
+An instance can live on another machine. The teams, the repository, the hooks and the board then run there, in tmux, and this machine relays commands over ssh and shows one view per team. The sessions survive this machine sleeping, rebooting or losing the network. Nothing changes for an instance without a target.
+
+**The target** is a `<host>:<path>`: anything `ssh` accepts as a destination (an alias from `~/.ssh/config`, `user@host`) and the project directory over there (a leading `~` is expanded by the server). `teams link <host>:<path>` records it in `.teams/remote.json` of the current directory, which can be a clone of the project or a folder kept only for this; `--remote` and `$TEAMS_REMOTE` give one without a file. Several directories can point at several servers and projects, each with its own views.
+
+`remote.json` belongs to one machine and stays out of git. The `.gitignore` written by `init` ignores it; in an instance created before 0.2.0, add the line `remote.json` by hand.
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `host` | required | The ssh destination. |
+| `path` | required | The project directory on the server, from which `teams` finds the instance. |
+| `command` | `teams` | The command run over there when `teams` is not on the login shell's PATH, for instance `~/agent-teams/bin/teams`. It is written into the remote shell line as it is. |
+| `ssh_options` | `[]` | Extra `ssh` arguments, as a list: `["-p", "2222"]`. |
+| `terminal` | `auto` | The driver of the local views, as in `teams.json`: `programa`, `tmux`, `manual` or `auto`. `tmux_session` and `shell_prompt_regex` are read here too. |
+| `mouse` | `true` | `false` leaves tmux's mouse mode off in the views. |
+
+**Prerequisites.** On the server: tmux; this engine, 0.2.0 or later, with `teams` on the PATH of the user's login shell (or `command`); an authenticated Claude Code with `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`; an instance created there with `teams init` and running with the `tmux` driver, which `auto` picks on a machine without Programa. Here: this engine, and ssh access that asks for nothing, a key or an agent, because the status call and the board forward run without a terminal. Both engines should be the same version: a difference is reported on stderr, and an engine that does not know `status --json` is refused with the advice to update it. The remote mode has been run from a Mac with Programa against an Ubuntu 22.04 server with tmux 3.2a and bash as the login shell.
+
+**How a command gets there.** `teams <arguments>` becomes `ssh <host>` running `exec "$SHELL" -lc 'cd <path> && teams <arguments>'`: the remote user's login shell, so its PATH finds `teams` and `claude`. Every word is put between single quotes, the path (but a leading `~`, left for the server to expand) and each argument, so no shell over there expands it: a word such as `=ls`, which zsh would turn into `/bin/ls`, arrives as typed. `--remote` is removed, and a terminal is requested only when your stdin and stdout are both terminals, so `teams task list | grep doing` stays clean. The exit code is the remote one. The suites run this line, and the view line below, under sh, bash, zsh, dash and ksh as the server's shell, those installed on the machine that runs them; fish is not tested.
+
+**`teams up`** asks the server for its status, refuses when the teams are already up there (`teams attach` is then the command), runs `teams up` over there, then opens the views. `teams up --resume` resumes over there, then opens the missing views. `teams up --dry-run` is only relayed.
+
+**`teams attach`** opens what is missing and leaves the rest alone. For each team, the manager last: when it has no view yet or its terminal is gone, a new terminal is opened; when the terminal is still there but nothing in it is connected any more, the view command is typed into it again; when the view is running, nothing happens. A team that has no terminal on the server is reported and skipped. With the `manual` driver the commands are printed for you to run. When the server reports another run than the one the views were opened for, the old views and the old board forward are closed first. Finally the manager's view is selected.
+
+**`teams down`** stops the teams over there first, then closes the views, stops the board forward and forgets them.
+
+**A view** is a terminal of the local driver, titled like its team, into which a `sh -c` loop is typed. The loop runs `ssh -t <host>` and, over there, through the login shell as above, `tmux new-session -A -s <session>-<team> -t =<session>`, then selects the team's window: the view uses the tmux the teams were started with. `<session>-<team>` is a tmux session *grouped* with the teams' one: every view sees the same windows and keeps its own current window, so two views show two teams at once. Every word of that line is single-quoted at each shell it crosses, which makes it long in a process list. The loop runs ssh again, 3 seconds later, each time it exits with 255, ssh's own code for a connection that failed or was lost. Any other exit, such as a detach (`C-b d`) or stopped teams, ends the loop and gives the terminal back to its shell. A connection that hangs rather than fails is declared dead after about 45 seconds (`ServerAliveInterval=15`, `ServerAliveCountMax=3`). When the server has no terminfo entry for your `TERM`, the view uses `xterm-256color`. Mouse mode is switched on for the view sessions only, so the wheel scrolls the session's history.
+
+**The board** stays bound to the server's `127.0.0.1`. A background loop of the same kind runs `ssh -N -L <port>:127.0.0.1:<port> <host>`, so the address printed by `teams up` works here as it is. When that port is already used on this machine, nothing is started and the command to run by hand with another local port is printed, its words quoted, ready to paste into any shell. The loop's output goes to `.state/tunnel.log`.
+
+**What this machine remembers** is in `.state/views.json` beside `remote.json`: the driver, one terminal handle per team, the run they belong to and the board forward's process. For a target given by `--remote` or `$TEAMS_REMOTE` it is under `~/.local/state/teams/<host-and-path>/` instead.
+
+**Limits.**
+
+- A view follows its tmux group: when its team's window is destroyed and recreated (`teams up --resume` after a dead session), the view shows another team's window. Close that view and run `teams attach`.
+- `teams attach` types into a view's terminal when it finds no view running there. Do not use a view's terminal for anything else.
+- The state of the teams (working, waiting for you) is not shown on the views; `teams status` and the board have it.
+- fish is not tested, neither as the server's login shell nor as your terminal's shell: its single quotes give `\'` and `\\` a meaning.
+- The local side needs a POSIX system; Windows is not supported.
+
 ## Runs, resume and archives
 
 A fresh `teams up` starts a new run: previous `.state/sessions/` and `.state/messages/` move to `.state/history/<timestamp>/`, and `teams cost` reads the current run only. `up --resume` keeps the run, recreates missing terminals, reuses live sessions and restarts dead ones with their recorded session id; a team without one starts fresh. `teams down` closes the terminals and clears `.state/terminal.json`; tickets, rules and the notification queue are untouched.
@@ -179,6 +228,7 @@ Engine (this repository):
 bin/teams          launcher and CLI
 bin/teams-board    board server
 bin/terminal.py    terminal drivers (programa, tmux, manual)
+bin/remote.py      remote instances: target, relay over ssh, local views, board forward
 bin/tasklib.py     ticket model, validation, locked atomic writes
 bin/hooklib.py     session tracking and message mirroring (called by the Claude hooks)
 bin/storage.py     locked JSON helpers
@@ -197,15 +247,17 @@ Instance (one per project):
 
 ```
 .teams/teams.json  configuration
+.teams/remote.json a target on another machine, written by `teams link`: with it, commands act over there
 .teams/prompts/    this project's role prompts (override engine files of the same name)
 .teams/workers/    optional worker overrides
 .teams/rules/      generated digests and your .local.md notes
 .teams/shared/     tasks/, LOG.md, .roster.json, optional PLAN.md and CONTRACTS.md
 .teams/engine/     optional vendored engine to pin a version
 .teams/.state/     generated prompts, sessions, messages, notifications, terminal handles, board state (gitignored)
+.teams/.state/views.json   for a remote instance: its local views and its board forward
 ```
 
-The instance `.gitignore` written by `init` ignores runtime state and, by default, the tickets; remove two lines to version them.
+The instance `.gitignore` written by `init` ignores runtime state, `remote.json` and, by default, the tickets; remove two lines to version them.
 
 ## Tests
 
@@ -214,4 +266,4 @@ python3 -B -m unittest discover -s tests -v
 node --test tests/board-ui.test.cjs
 ```
 
-The suites cover concurrent ticket updates, message routing and replay, session lifecycle, the terminal drivers, board notifications, a real loopback HTTP server with temporary data, and the permitted UI transitions. Model calls and terminal commands are mocked.
+The suites cover concurrent ticket updates, message routing and replay, session lifecycle, the terminal drivers, remote instances (target resolution, the relay, the views and the board forward; the relay line and the view line are read by real shells, sh, bash, zsh, dash and ksh, each reported as skipped where it is not installed, through a fake ssh and tmux), board notifications, a real loopback HTTP server with temporary data, and the permitted UI transitions. Model calls, ssh and terminal commands are mocked.
